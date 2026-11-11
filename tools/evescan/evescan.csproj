@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Command line queries over eve.Emg, for finding NPCs, dialogs, marks and items to test against. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>evescan</AssemblyName>
+    <RootNamespace>NorthIsland.Tools.EveScan</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/NorthIsland.GameData/NorthIsland.GameData.csproj" />
+  </ItemGroup>
+
+</Project>
