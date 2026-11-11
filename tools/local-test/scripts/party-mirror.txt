@@ -1,0 +1,16 @@
+# The party NPC mirror: the leader logs in (the members from party.txt follow), turns the mirror on in the group window,
+# talks to NPC place 1 of map 10037 (npc 12032) and picks choice 3 of its dialog; the members answer the same way.
+# Needs the seeded accounts: choice 3 moves their quest on, so run seed.sh (server stopped) before each run.
+login testlead test1234 1
+button MainGroup
+waitwin GroupPartyMirror 5000
+button GroupPartyMirror
+wait 300
+clickobj npcindex 1
+waitdialog
+choose 3
+skiptalk
+waitevent
+wait 500
+shot done
+quit

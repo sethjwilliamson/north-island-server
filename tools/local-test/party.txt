@@ -1,0 +1,3 @@
+# Party members for the client's --accounts: account password slot auto|manual (test passwords only)
+testmem1 test1234 1 auto
+testmem2 test1234 1 auto

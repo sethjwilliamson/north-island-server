@@ -1,0 +1,15 @@
+{
+  "game": {
+    "partyLogin": true
+  },
+  "sound": {
+    "loadingMusicOn": false,
+    "loadingSoundOn": false
+  },
+  "window": {
+    "display": "windowed",
+    "height": 600,
+    "remember": false,
+    "width": 800
+  }
+}

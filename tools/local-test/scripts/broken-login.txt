@@ -1,0 +1,4 @@
+# A script that must fail: the server refuses the password, the client logs "script: ERROR login refused ..." and exits with code 3.
+login testlead wrongpass 1
+waitdialog
+quit
