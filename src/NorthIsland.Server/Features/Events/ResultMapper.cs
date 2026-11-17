@@ -74,6 +74,8 @@ public static class ResultMapper
             case 3 when r.SubKind is 1 or 2: // 3/1 and 3/2: an NPC joins or leaves the team
                 return new MappedResult(ResultAction.TeamNpc, Description: $"NPC {r.Arg1} {(r.SubKind == 1 ? "joins" : "leaves")} the team", Service: r.Arg1,
                     Convey: r.SubKind);
+            case 3 when r.SubKind == 5 && r.Arg1 != 0: // 3/5: the amity of team NPC Arg1 changes by Value
+                return new MappedResult(ResultAction.Amity, Description: $"NPC {r.Arg1} amity {r.Value:+0;-0}", Service: r.Arg1, Convey: r.Value);
             case 12 when r.SubKind == 1 && r.Arg1 is >= 1 and <= 255: // 12/1: change the role
                 return new MappedResult(ResultAction.RoleChange, Description: $"role change to {r.Arg1}", Service: r.Arg1);
             case 13 when r.Arg2 == 0: // 13: minimap sign of -1, skipped

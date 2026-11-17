@@ -15,6 +15,9 @@ public enum GemRefusal
     /// <summary>The piece is a gun.</summary>
     Gun,
 
+    /// <summary>The piece is item-mall equipment, which has no socket.</summary>
+    MallEquipment,
+
     /// <summary>A critical stone was meant for something other than a weapon.</summary>
     NotWeapon,
 

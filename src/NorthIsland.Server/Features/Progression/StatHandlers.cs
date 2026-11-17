@@ -12,7 +12,10 @@ public sealed class StatHandlers(
     CombatStats combat,
     ILogger<StatHandlers> logger)
 {
-    /// <summary>Handles a stat point spend request: raises the listed attributes if the points are available, else resends the current values.</summary>
+    /// <summary>
+    /// Handles a stat point spend request: raises the listed attributes if the points are available and no attribute passes the cap of
+    /// <see cref="ItemEffectHandlers.AbilityCap"/>, else resends the current values.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: a leading byte, a count, then count pairs of attribute id (byte) and points (int).</param>
     internal ValueTask OnSpend(GameSession session, ReadOnlyMemory<byte> body)
@@ -29,10 +32,12 @@ public sealed class StatHandlers(
             raises.Add((r.U8(), r.I32()));
 
         var total = raises.Sum(x => (long)x.Points);
-        if (raises.Count == 0 || raises.Any(x => x.Points <= 0 || Stat(character, x.Attr) is null) || total > character.StatPoints)
+        var cap = ItemEffectHandlers.AbilityCap(character.Potential);
+        if (raises.Count == 0 || raises.Any(x => x.Points <= 0 || Stat(character, x.Attr) is null) || total > character.StatPoints
+            || raises.GroupBy(x => x.Attr).Any(g => Stat(character, g.Key)!.Value + g.Sum(x => (long)x.Points) > cap))
         {
-            logger.LogWarning("[{Session}] {Name}: refused stat points {Raises} (has {Points})", session.Id, character.Name,
-                string.Join(", ", raises.Select(x => $"{x.Attr}+{x.Points}")), character.StatPoints);
+            logger.LogWarning("[{Session}] {Name}: refused stat points {Raises} (has {Points}, cap {Cap})", session.Id, character.Name,
+                string.Join(", ", raises.Select(x => $"{x.Attr}+{x.Points}")), character.StatPoints, cap);
             SendStats(session, character);
             return ValueTask.CompletedTask;
         }

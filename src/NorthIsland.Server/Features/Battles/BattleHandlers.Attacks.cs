@@ -19,7 +19,8 @@ public sealed partial class BattleHandlers
         SkillRecord skill,
         Fighter target)
     {
-        var area = battle.AreaAround(target, skill.AreaAt(BattleFormulas.SkillLevelOf(player, skill.Id)));
+        var areaCode = skill.AreaAt(BattleFormulas.SkillLevelOf(player, skill.Id));
+        var area = battle.AreaAround(target, areaCode);
         var amount = BattleFormulas.HealAmount(player, skill.Power);
         List<ActionTarget> hits = [];
         List<(Fighter Fighter, FighterStatus Status)> removed = [];
@@ -67,6 +68,7 @@ public sealed partial class BattleHandlers
             hits.Add(new ActionTarget(f.Row, f.Col, hit, Guard: 0, values));
             whats.Add($"{f.Name} {what}");
         }
+        battle.SendAttackArea(player, areaCode);
         battle.Send(client => BattleMessages.Action(player.Row, player.Col, skill.Id, hits, client));
         if (took)
             TrainSkill(session, player, skill, target.Level);
@@ -191,7 +193,8 @@ public sealed partial class BattleHandlers
         if (target is null)
             return;
         var skillId = skill?.Id ?? attack.SkillOrItem;
-        var area = skill is null ? [target] : battle.AreaAround(target, skill.AreaAt(BattleFormulas.SkillLevelOf(player, skill.Id)));
+        var areaCode = skill?.AreaAt(BattleFormulas.SkillLevelOf(player, skill.Id)) ?? 1;
+        var area = battle.AreaAround(target, areaCode);
         List<ActionTarget> hits = [];
         List<Fighter> landed = [];
         var gain = 0;
@@ -211,6 +214,7 @@ public sealed partial class BattleHandlers
                 missed ? " (missed)" : "",
                 rider is null ? "" : $" (status {skill!.Effect})", hit.Hp, hit.MaxHp);
         }
+        battle.SendAttackArea(player, areaCode);
         battle.Send(client => BattleMessages.Action(player.Row, player.Col, skillId, hits, client));
         TrainSkill(session, player, skill, gain);
         await ActionPause(skillId, player, area).ConfigureAwait(false);
@@ -438,6 +442,8 @@ public sealed partial class BattleHandlers
             foreach (var member in played.Select(p => p.Attacker).Where(a => a.IsHuman && !target.KilledBy.Contains(a)))
                 CreditKill(member, target);
         }
+        foreach (var member in members)
+            battle.SendAttackArea(member.Attacker);
         battle.Send(client => BattleMessages.Actions(records, client));
         foreach (var (attacker, skill, gain) in trained)
             TrainSkill(session, attacker, skill, gain);
@@ -522,7 +528,8 @@ public sealed partial class BattleHandlers
         var skillId = skill?.Id ?? SkillTable.HandAttack;
         if (skill is not null)
             monster.Sp -= skill.SpCost;
-        var area = skill is null ? [player] : battle.AreaAround(player, skill.AreaAt(BattleFormulas.SkillLevelOf(monster, skill.Id)));
+        var areaCode = skill?.AreaAt(BattleFormulas.SkillLevelOf(monster, skill.Id)) ?? 1;
+        var area = battle.AreaAround(player, areaCode);
         List<ActionTarget> hits = [];
         foreach (var hit in area)
         {
@@ -533,6 +540,7 @@ public sealed partial class BattleHandlers
                 skill is null ? "hits" : $"uses {skill.Name} ({skill.SpCost} SP) on", hit.Name, damage, critical ? " (critical)" : "",
                 hit.Defending ? " (defending)" : "", hit.Hp, hit.MaxHp);
         }
+        battle.SendAttackArea(monster, areaCode);
         battle.Send(client => BattleMessages.Action(monster.Row, monster.Col, skillId, hits, client));
         await ActionPause(skillId, monster, area, defends: area.Exists(f => f.Defending)).ConfigureAwait(false);
         foreach (var hit in area)

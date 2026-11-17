@@ -153,6 +153,32 @@ public sealed partial class EventEngine
         }
     }
 
+    /// <summary>
+    /// Changes the amity of a team NPC (a quest reward): the NPC in the team, else the one in storage or the one that left the team,
+    /// kept between 0 and the amity ceiling. The client hears of it when the NPC is in the team.
+    /// </summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="character">The character.</param>
+    /// <param name="run">The running event, for the log.</param>
+    /// <param name="npcId">The NPC id.</param>
+    /// <param name="change">The amity to add; negative to take.</param>
+    public void TeamNpcAmity(GameSession session, Character character, EventRun run, ushort npcId, int change)
+    {
+        var pet = character.Pets.Find(p => p.NpcId == npcId)
+            ?? character.StoredPets.Find(p => p.NpcId == npcId)
+            ?? character.DepartedTeamNpcs.Find(p => p.NpcId == npcId);
+        if (pet is null)
+        {
+            logger.LogInformation("[{Session}] {Source}: NPC {Npc} amity {Change:+0;-0}: the player doesn't have it", session.Id, run.Source, npcId, change);
+            return;
+        }
+        var max = Math.Clamp(itemOptions.Value.ItemUse.MaxAmity, 1, byte.MaxValue);
+        pet.Amity = (byte)Math.Clamp(pet.Amity + change, 0, Math.Max(max, (int)pet.Amity));
+        if (character.Pets.Contains(pet))
+            session.Send(Protocol.Messages.Player.PetMessages.SetAttribute(pet.Slot, Protocol.Opcodes.Action8.AttrAmity, pet.Amity));
+        logger.LogInformation("[{Session}] {Source}: {Pet} ({Npc}) amity {Change:+0;-0}, now {Amity}", session.Id, run.Source, pet.Name, npcId, change, pet.Amity);
+    }
+
     /// <summary>Charges the account's mall points for a hire tier when the character's level and the points allow it.</summary>
     /// <param name="session">The player's session.</param>
     /// <param name="character">The character.</param>

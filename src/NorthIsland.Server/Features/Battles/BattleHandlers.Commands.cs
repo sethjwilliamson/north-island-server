@@ -237,6 +237,7 @@ public sealed partial class BattleHandlers
             o.CaptureHpBelowPercent, o.CaptureLevelsAbove + (net is null ? 0 : o.MonsterNetLevels));
         var caught = refusal is null
             && GameRandom.Shared.NextDouble() * 100 < BattleFormulas.CaptureChance(target.Hp, target.MaxHp, character.Level, npc.Level, o);
+        battle.SendAttackArea(player);
         battle.Send(client => BattleMessages.Action(player.Row, player.Col, SkillTable.Capture,
             [new ActionTarget(target.Row, target.Col, Hit: caught, Guard: caught ? (byte)0 : (byte)4, [])], client));
         if (caught)
@@ -295,6 +296,7 @@ public sealed partial class BattleHandlers
         if (stack.Count == 0)
             character.Bag.Remove(stack);
         user.Session.Send(Protocol.Messages.Items.ItemMessages.BagSlotDecrease(use.Extra, 1));
+        battle.SendAttackArea(user);
         battle.Send(client => BattleMessages.Action(user.Row, user.Col, SkillTable.ItemUsage,
             [new ActionTarget(player.Row, player.Col, Hit: true, Guard: 0, values)], client));
         logger.LogInformation("[{Session}] {User} uses {Item} ({ItemName}) on {Target}: HP {Hp}/{MaxHp}, SP {Sp}/{MaxSp}", session.Id, user.Name,

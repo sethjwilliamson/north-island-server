@@ -21,11 +21,8 @@ public sealed class PetOptions
     /// <summary>The chance in percent (0..100) that a pet below <see cref="PetRunAwayAmity"/> runs away after a fall.</summary>
     public int PetRunAwayChancePercent { get; set; } = 50;
 
-    /// <summary>The points added to each of a pet's five abilities for each level it gains.</summary>
+    /// <summary>The ability points a pet gains for each level, each given to a random ability below the cap of its potential.</summary>
     public int PetStatsPerLevel { get; set; } = 1;
-
-    /// <summary>The extra points added to a pet's highest ability for each level it gains.</summary>
-    public int PetBonusStatsPerLevel { get; set; } = 2;
 
     /// <summary>The amity a captured monster joins with; 0 means the usual amity of a new pet.</summary>
     public int CapturedPetAmity { get; set; }

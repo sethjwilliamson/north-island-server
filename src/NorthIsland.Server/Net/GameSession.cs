@@ -78,6 +78,12 @@ public sealed class GameSession : IAsyncDisposable
     /// <summary>The state of the map's NPCs for this player, by NPC role, as set by event scripts.</summary>
     public Dictionary<ushort, byte> NpcStates { get; } = [];
 
+    /// <summary>
+    /// The shows and hides of the map's NPCs that event scripts sent to this player since the map was entered, by NPC role: true for a show,
+    /// with the record's seconds. A move inside the map makes the client load it again and forget them, so they are sent again then.
+    /// </summary>
+    public Dictionary<ushort, (bool Shown, int Seconds)> NpcVisibility { get; } = [];
+
     /// <summary>True while the player is in GM admin mode.</summary>
     public bool AdminMode { get; set; }
 

@@ -39,6 +39,9 @@ public enum ResultAction
     /// <summary>Make a team NPC join or leave the player's team.</summary>
     TeamNpc,
 
+    /// <summary>Change the amity of a team NPC: the NPC id is in <see cref="MappedResult.Service"/>, the change in <see cref="MappedResult.Convey"/>.</summary>
+    Amity,
+
     /// <summary>Make an NPC play an action for everyone on the map.</summary>
     NpcAction,
 

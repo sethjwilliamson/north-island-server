@@ -63,6 +63,7 @@ public sealed partial class EventEngine(
     SkillData skills,
     LifeSkills lifeSkills,
     Microsoft.Extensions.Options.IOptions<EventOptions> options,
+    Microsoft.Extensions.Options.IOptions<Items.ItemOptions> itemOptions,
     ILogger<EventEngine> logger)
 {
     /// <summary>The NPC action that is the standing pose.</summary>
@@ -155,6 +156,10 @@ public sealed partial class EventEngine(
                 GuildId = guilds.Of(session.Account!.LoginId)?.Id ?? 0,
                 TeamWithoutGuild = TeamOrSelf(session.Account!.LoginId).Count(id => guilds.Of(id) is null),
                 ScriptNow = ScriptClock(character.MapId),
+                Clock = () => calendar.Clock(),
+                RidingVehicle = session.Vehicle is { Riding: true } vehicle ? vehicle.ItemId : (ushort)0,
+                RoomFor = id => World.Bag.IsStackable(items[id]) && character.Bag.Exists(b => b.ItemId == id && b.Count < World.Bag.MaxStack)
+                    || World.Bag.FreeSlot(character, items, id) != 0,
             };
 
     /// <summary>Lists the ids of the players in a player's team.</summary>
@@ -169,6 +174,11 @@ public sealed partial class EventEngine(
         if (session.Event is null)
         {
             session.Send(EventMessages.Finished());
+            return;
+        }
+        if (session.Event.WaitsForEntry)
+        {
+            logger.LogInformation("[{Session}] {Source}: next while the map loads, ignored", session.Id, session.Event.Source);
             return;
         }
         Advance(session);
@@ -289,11 +299,13 @@ public sealed partial class EventEngine(
 
                 case ResultAction.Client when run.ServerStarted && mapped.Wire is { Kind: 0, Mode: 3, Option: 4 }: // show an NPC to the player (22/11)
                     session.Send(EventMessages.NpcShowFor(mapped.Wire.Target, (ushort)Math.Clamp(mapped.Wire.Value, 0, ushort.MaxValue)));
+                    session.NpcVisibility[mapped.Wire.Target] = (true, mapped.Wire.Value);
                     logger.LogInformation("[{Session}] {Source}: {What} (22/11)", session.Id, run.Source, mapped.Description);
                     break;
 
                 case ResultAction.Client when run.ServerStarted && mapped.Wire is { Kind: 0, Mode: 3, Option: 3 }: // hide an NPC (22/3)
                     session.Send(EventMessages.NpcHide(mapped.Wire.Target, mapped.Wire.Value));
+                    session.NpcVisibility[mapped.Wire.Target] = (false, mapped.Wire.Value);
                     logger.LogInformation("[{Session}] {Source}: {What} (22/3)", session.Id, run.Source, mapped.Description);
                     break;
 
@@ -303,6 +315,8 @@ public sealed partial class EventEngine(
                         session.NpcStates[mapped.Wire.Target] = (byte)mapped.Wire.Value;
                     if (mapped.Wire is { Kind: 0, Mode: 3, Option: 3 })
                         run.ActedRoles.Remove(mapped.Wire.Target);
+                    if (mapped.Wire is { Kind: 0, Mode: 3, Option: 3 or 4 })
+                        session.NpcVisibility[mapped.Wire.Target] = (mapped.Wire.Option == 4, mapped.Wire.Value);
                     if (run.Instance is not null
                         && mapped.Wire is { Kind: 0, Mode: 3, Option: 3 or 4 }
                         && (mapped.Wire.Option == 4 || mapped.Wire.Value == ushort.MaxValue))
@@ -338,7 +352,37 @@ public sealed partial class EventEngine(
                         marks.SendRemoved(session, EventArenas.ClearRun(leaver, EventArenas.ProgressMarks(run.MapId)));
                     world.ChangeMap(session, new DoorWarp(target, (ushort)Math.Clamp(convey.X, 0, ushort.MaxValue),
                         (ushort)Math.Clamp(convey.Y, 0, ushort.MaxValue), (ushort)convey.Index));
-                    run.Pending.Clear();
+                    if (target == run.MapId)
+                    {
+                        // A move inside the map: the group's later results (show NPCs, marks, items) still belong to this map,
+                        // so they go on once the client has loaded it again (EnterMap).
+                        run.WaitsForEntry = true;
+                        logger.LogInformation("[{Session}] {Source}: moved inside the map; the event goes on after the map loads", session.Id, run.Source);
+                        return;
+                    }
+                    // Another map: the rest of this map's event no longer applies, except the group's quest marks, which
+                    // the data sets after the warp for the new map's entry event to read (quest 244: the Inn's door 2
+                    // warps to the Secret Room, then marks 14166, which shows Kurokawa there)
+                    while (run.Pending.TryDequeue(out var rest))
+                    {
+                        var after = ResultMapper.Map(rest);
+                        if (after.Action != ResultAction.Mark)
+                            continue;
+                        var done = ApplyMark(session, character, rest);
+                        logger.LogInformation(
+                            "[{Session}] {Source}: {What} (now {Count}) after the warp",
+                            session.Id,
+                            run.Source,
+                            after.Description,
+                            character.MarkCount(rest.SubKind));
+                        if (done && marks.Stars(rest.SubKind) is var paidStars and > 0)
+                        {
+                            var star = ResultMapper.Map(new EveScriptRecord(rest.Step, 1, 1, 1, StarItem, 0, paidStars, 0, 0, 0));
+                            var paid = ApplyItem(session, character, run, star with { Description = $"{star.Description} for finishing the quest" });
+                            if (paid > 0)
+                                SendRecord(session, run, star.Wire with { Value = paid });
+                        }
+                    }
                     run.Groups.Clear();
                     break;
 
@@ -472,6 +516,10 @@ public sealed partial class EventEngine(
                     logger.LogInformation("[{Session}] {Source}: {What}", session.Id, run.Source, mapped.Description);
                     break;
 
+                case ResultAction.Amity: // the amity of a team NPC changes
+                    TeamNpcAmity(session, character, run, npcId: (ushort)mapped.Service, change: mapped.Convey);
+                    break;
+
                 case ResultAction.TeamNpc: // an NPC joins or leaves the team
                     TeamNpc(session, character, run, npcId: (ushort)mapped.Service, joins: mapped.Convey == 1);
                     break;
@@ -581,6 +629,9 @@ public sealed partial class EventEngine(
         while (run.Groups.TryDequeue(out var group))
         {
             run.GuildId = guilds.Of(session.Account!.LoginId)?.Id ?? 0;
+            if (run.GroupEvent is { } last && last != group.EventIndex)
+                run.BattleOutcome = null; // the fight of an earlier event: this event's "battle won" groups wait for its own fight
+            run.GroupEvent = group.EventIndex;
             if (!ConditionEvaluator.Holds(group, character, run, logger))
                 continue;
             logger.LogInformation("[{Session}] {Source}: {Group} holds, {Count} result(s)", session.Id, run.Source, group.Label, group.Results.Count);

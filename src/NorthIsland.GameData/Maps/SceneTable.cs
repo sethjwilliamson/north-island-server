@@ -9,8 +9,9 @@ public sealed class SceneTable
     /// <summary>Size of one SceneData.Dat record in bytes.</summary>
     public const int RecordSize = 131;
 
-    /// <summary>Largest number of instance scenes taken from the file.</summary>
-    public const int MaxInstances = 19;
+    /// <summary>Largest number of instance scenes taken from the file: 25, as the 2014 client (AddDupMission stops above 25; the
+    /// 2008 and 2010 clients stopped at 19). The 2014 data has 20, the 20th being Sealing Space (30025, quest 702).</summary>
+    public const int MaxInstances = 25;
 
     /// <summary>The scenes by id.</summary>
     private readonly Dictionary<ushort, SceneRecord> _byId;

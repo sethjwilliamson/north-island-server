@@ -66,6 +66,6 @@ public sealed class FusionHandlers(
     /// True for a piece of equipment slots 1 to 5 that gives an attribute, has no use period and is not marked with flag 0x200.
     /// </returns>
     public static bool Fits(NorthIsland.GameData.Items.ItemRecord r) =>
-        r.EquipSlot is >= 1 and <= 5 && (r.Words415.Length < 3 || r.Words415[2] == 0) && (r.Flags & 0x200) == 0 && r.UsePeriod == 0
+        r.EquipSlot is >= 1 and <= 5 && (r.Words415.Length < 3 || r.Words415[2] == 0) && (r.Flags & Gems.MallFlag) == 0 && r.UsePeriod == 0
             && !(r.Words36.Length >= 2 && r.Words36[0] is 0 or 250 && r.Words36[1] is 0 or 250); // 250 EquipmentClass, 250 EquipmentClass
 }

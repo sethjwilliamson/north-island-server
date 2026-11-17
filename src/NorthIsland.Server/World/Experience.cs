@@ -35,7 +35,7 @@ public sealed class Experience(
             return false;
         var level = (byte)f.LevelFromExp(pet.Exp, pet.Reborn);
         var levelBefore = pet.Level;
-        if (!Pets.LevelUp(pet, level, f, options.Value.PetStatsPerLevel, options.Value.PetBonusStatsPerLevel))
+        if (!Pets.LevelUp(pet, level, f, options.Value.PetStatsPerLevel, GameRandom.Shared.Next))
         {
             logger.LogInformation("[{Session}] pet {Pet} gains {Exp} exp ({Total} total)", session.Id, pet.Name, exp, pet.Exp);
             return false;

@@ -119,8 +119,7 @@ Environment variables such as `Server__GmAccounts` override them all.
 | `PetAmityPerLevel` | The amity a pet gains for each level it gains |
 | `PetRunAwayAmity` | The amity below which a pet that fell can run away; 0 means no pet runs away |
 | `PetRunAwayChancePercent` | The chance in percent (0..100) that a pet below PetRunAwayAmity runs away after a fall |
-| `PetStatsPerLevel` | The points added to each of a pet's five abilities for each level it gains |
-| `PetBonusStatsPerLevel` | The extra points added to a pet's highest ability for each level it gains |
+| `PetStatsPerLevel` | The ability points a pet gains for each level, each given to a random ability that is below 602 above its potential floor |
 
 ## world.json
 

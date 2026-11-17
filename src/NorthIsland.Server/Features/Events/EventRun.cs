@@ -61,6 +61,9 @@ public sealed class EventRun(
     /// <summary>Gives the time the date conditions of an event compare with, by event index.</summary>
     public Func<int, DateTime> ScriptNow { get; init; } = _ => GameClock.Now;
 
+    /// <summary>The server's time now, by the calendar's clock (the day of the week of condition 20/2).</summary>
+    public Func<DateTime> Clock { get; init; } = () => GameClock.Now;
+
     /// <summary>The point store rows the run has added so far, for the point store window it opens.</summary>
     public List<Protocol.Messages.Items.PointStoreRow> PointStoreRows { get; } = [];
 
@@ -79,6 +82,18 @@ public sealed class EventRun(
     /// <summary>The hire tier the last charge of the run went through for; 0 when it was refused or none ran.</summary>
     public int HireTier { get; set; }
 
+    /// <summary>
+    /// True after a warp to the same map (a move inside the map): the rest of the group waits until the client has loaded the map again,
+    /// then goes on instead of the map's entry events.
+    /// </summary>
+    public bool WaitsForEntry { get; set; }
+
+    /// <summary>Tells whether the player's bag has room for one more of an item: a stack of it that isn't full, or a free place.</summary>
+    public Func<ushort, bool> RoomFor { get; init; } = _ => true;
+
+    /// <summary>The item id of the vehicle the player is riding when the run starts; 0 when none.</summary>
+    public ushort RidingVehicle { get; init; }
+
     /// <summary>True once a condition group with results has held.</summary>
     public bool AnyGroupHeld { get; set; }
 
@@ -93,6 +108,12 @@ public sealed class EventRun(
 
     /// <summary>How the last battle of the run ended; null while none has.</summary>
     public BattleOutcome? BattleOutcome { get; set; }
+
+    /// <summary>
+    /// The event of the group the run took last. A fight's outcome belongs to the event that fought it: every event whose groups test
+    /// the outcome starts its own fight, so the outcome is cleared when the run moves on to the groups of another event.
+    /// </summary>
+    public int? GroupEvent { get; set; }
 
     /// <summary>The kind of the minigame the run started and is waiting on; null for none.</summary>
     public int? PendingMinigame { get; set; }

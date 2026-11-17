@@ -14,6 +14,9 @@ public static class Gems
     /// <summary>Item sub type of the weapons that have a critical chance of their own; they take no critical stone.</summary>
     public const byte CriticalSubType = 137;
 
+    /// <summary>Item flag of the item-mall equipment (the +1 to +10 weapons, the Kung-Fu Suits, ...): "can be enhanced but not socketed".</summary>
+    public const ushort MallFlag = 0x200;
+
     /// <summary>Item sub type of the class manteaus, the only accessories that take a stone.</summary>
     public const byte ManteauSubType = 142;
 
@@ -38,6 +41,8 @@ public static class Gems
             return equipment.SubType == ManteauSubType ? GemRefusal.None : GemRefusal.SpecialItem;
         if (equipment.Type == GunType)
             return GemRefusal.Gun;
+        if ((equipment.Flags & MallFlag) != 0)
+            return GemRefusal.MallEquipment;
         if (stone.Type == CriticalStoneType)
             return equipment.EquipSlot != WeaponSlot
                 ? GemRefusal.NotWeapon
@@ -69,8 +74,32 @@ public static class Gems
         };
     }
 
-    /// <summary>The attribute points each fusion level adds to every attribute the piece gives.</summary>
+    /// <summary>The attribute points each fusion level adds to a piece with one raised attribute line; with two lines each gets half.</summary>
     public const int FusionPerLevel = 2;
+
+    /// <summary>
+    /// Works out the attribute points a fusion level adds to each raised line of a piece: <see cref="FusionPerLevel"/> per level for a piece
+    /// with one line that a fusion raises (HP, SP, max HP, max SP, ATK, DEF, SPD, MATK, MDEF), one per level for a piece with two such lines,
+    /// as the client shows it.
+    /// </summary>
+    /// <param name="equipment">The item record of the piece.</param>
+    /// <param name="fusion">The fusion level of the piece.</param>
+    /// <returns>The points added to each raised line; 0 when no line is raised.</returns>
+    public static int FusionBonus(ItemRecord equipment, byte fusion)
+    {
+        var lines = 0;
+        for (var i = 0; i < Math.Min(equipment.Words36.Length, equipment.Ints42.Length); i++)
+        {
+            if (equipment.Words36[i] is 25 or 26 or 207 or 208 or 210 or 211 or (>= 214 and <= 216) && equipment.Ints42[i] > 100)
+                lines++;
+        }
+        return lines switch
+        {
+            1 => fusion * FusionPerLevel, // one raised line: the full bonus
+            2 => fusion * FusionPerLevel / 2, // two lines: half each
+            _ => 0 // any other number of lines: no bonus
+        };
+    }
 
     /// <summary>Works out the value of one attribute of a piece including its mounted stone and fusion level.</summary>
     /// <param name="equipment">The item record of the piece.</param>
@@ -81,7 +110,7 @@ public static class Gems
     public static int Effect(ItemRecord equipment, ItemRecord? stone, byte attr, byte fusion = 0)
     {
         var own = equipment.Effect(attr);
-        return own > 0 ? own + Bonus(equipment, stone) + fusion * FusionPerLevel : own;
+        return own > 0 ? own + Bonus(equipment, stone) + FusionBonus(equipment, fusion) : own;
     }
 
     /// <summary>Reads the critical chance a mounted stone gives.</summary>

@@ -68,8 +68,17 @@ public static class ConditionEvaluator
                 return Compare(character.Level, c.Arg3, c.Value);
             case 2 when c.SubKind == 1 && c.Arg1 == 5: // 2/1/5: hire tier of the run compared
                 return Compare(run.HireTier, c.Arg3, c.Value);
+            case 2 when c.SubKind == 1 && c.Arg1 == 4: // 2/1/4: riding vehicle Arg2, compared as 0 when riding it and 1 when not (op 5 riding, 6 not)
+                return Compare(run.RidingVehicle != 0 && run.RidingVehicle == c.Arg2 ? 0 : 1, c.Arg3, c.Value);
             case 2 when c.SubKind == 4: // 2/4: element compared with the argument
                 return Compare(character.Element, c.Arg3, c.Arg1);
+            case 2 when c.SubKind == 5: // 2/5: career (job) compared with the argument, as 2/4 the element (the data's only use: the
+                // Bead Guardian of Chinshi Huang's Tomb teaches each career's skill, Arg1 1 Killer's Murder to 6 Seer's Foretell)
+                return Compare(character.Job, c.Arg3, c.Arg1);
+
+            case 20 when c.SubKind == 2: // 20/2: day of the week (0 Sunday to 6 Saturday) compared with the argument (the data's only
+                // use: the Athens Guard's Sunday Cursed Palace switch, 20/2/0 equal and not equal)
+                return Compare((int)run.Clock().DayOfWeek, c.Arg3, c.Arg1);
 
             case 2 when c.SubKind == 3 && c.Arg1 is 7 or 8: // 2/3/7 and 2/3/8: body type is male (7) or not (8)
                 return MarriageRegistry.IsMale(character.BodyType) == (c.Arg1 == 7);
@@ -91,6 +100,8 @@ public static class ConditionEvaluator
                 return character.Pets.Find(p => p.NpcId == c.Arg2) is { } pet && Compare(pet.Amity, c.Arg3, c.Value);
             case 2 when c.SubKind == 2 && c.Arg1 == 6: // 2/2/6: id of the active pet compared
                 return Compare(character.ActivePetId, c.Arg3, c.Value);
+            case 2 when c.SubKind == 2 && c.Arg1 == 10: // 2/2/10: level of team pet Arg2 compared, as 2/2/7 its amity (the data's only use: Elin above level 39, Elin's Plasma Wafer)
+                return character.Pets.Find(p => p.NpcId == c.Arg2) is { } leveled && Compare(leveled.Level, c.Arg3, c.Value);
             case 2 when c.SubKind == 2 && c.Arg1 == 11: // 2/2/11: level of the active pet compared, 0 when none
                 return Compare(character.Pets.Find(p => p.NpcId == character.ActivePetId && character.ActivePetId != 0)?.Level ?? 0, c.Arg3, c.Value);
 
@@ -101,6 +112,10 @@ public static class ConditionEvaluator
                     2 => run.Castles?.WarOn != true, // castle war is off
                     _ => run.CastleGuildMember // the player is in a castle guild
                 };
+
+            case 9 when c.SubKind == 3 && c.Arg1 == 1: // 9/3/1: the castle has an owner guild (1) or not (0), compared; inferred: the
+                // Trojan round battles pick the small battle 1 when it has (op 6, != 0) and the full garrison battle 2 when not (op 5, == 0)
+                return Compare(run.Castles?.Owner is null ? 0 : 1, c.Arg3, c.Value);
 
             case 9 when c.SubKind == 1 && c.Arg1 == 0: // 9/1/0: guild id compared
                 return Compare((int)Math.Min(run.GuildId, int.MaxValue), c.Arg3, c.Value);
@@ -122,6 +137,9 @@ public static class ConditionEvaluator
             case 5 when c.Arg1 == 2: // 5 with Arg1 2: the character has no mark SubKind
                 return character.MarkCount(c.SubKind) == 0;
 
+            case 5 when c.Arg1 == 5 && c.Arg2 is >= 1 and <= 8: // 5 with Arg1 5: bit Arg2 of mark SubKind compared (the bits 3/x/1 results set)
+                return Compare((character.MarkCount(c.SubKind) >> (c.Arg2 - 1)) & 1, c.Arg3, c.Value);
+
             case 3 when c.Arg1 == 3: // 3 with Arg1 3: state of NPC SubKind compared
                 return Compare(run.NpcStates.GetValueOrDefault(c.SubKind), c.Arg3, c.Value);
 
@@ -139,6 +157,9 @@ public static class ConditionEvaluator
 
             case 19 when c.Arg1 is 1 or 2: // 19: instance value of SubKind, zero (Arg1 2) or compared (1)
                 return InstanceValue(c.SubKind, run) is var value && (c.Arg1 == 2 ? value == 0 : Compare(value, c.Arg3, c.Value));
+
+            case 15 when c.SubKind is 2 or 3: // 15/2 and 15/3: the bag has room (2) or no room (3) for one item Arg1
+                return run.RoomFor(c.Arg1) == (c.SubKind == 2);
 
             case 15 when c.SubKind == 1: // 15/1: free bag places compared
                 return Compare(BagItem.LastSlot - character.Bag.Count, c.Arg3, c.Value);
@@ -161,19 +182,21 @@ public static class ConditionEvaluator
     public static bool IsSupported(EveScriptRecord c) => c.Kind switch
     {
         1 or 7 or 8 => true, // kinds 1, 7, 8: always implemented
-        2 => c.SubKind == 1 && c.Arg1 is >= 1 and <= 3 or 5 || c.SubKind == 2 && c.Arg1 is 1 or 2 or 5 or 6 or 7 or 8 or 9 or 11 || c.SubKind == 4
-            || c.SubKind == 3 && c.Arg1 is 7 or 8, // kind 2: sub kinds 1 to 4 with the listed arguments
+        2 => c.SubKind == 1 && c.Arg1 is >= 1 and <= 5 || c.SubKind == 2 && c.Arg1 is 1 or 2 or 5 or 6 or 7 or 8 or 9 or 10 or 11 || c.SubKind == 4
+            || c.SubKind == 3 && c.Arg1 is 7 or 8 || c.SubKind == 5, // kind 2: sub kinds 1 to 5 with the listed arguments
         16 => c.SubKind is >= 2 and <= 7, // kind 16: sub kinds 2 to 7
-        5 => c.Arg1 is 1 or 2, // kind 5: arguments 1 and 2
+        5 => c.Arg1 is 1 or 2 || c.Arg1 == 5 && c.Arg2 is >= 1 and <= 8, // kind 5: arguments 1 and 2, and 5 (a bit)
         6 => c.SubKind is 1 or 2, // kind 6: sub kinds 1 and 2
-        9 => c.SubKind == 2 && c.Arg1 is >= 1 and <= 3, // kind 9: sub kind 2, arguments 1 to 3
+        9 => c.SubKind == 2 && c.Arg1 is >= 1 and <= 3 || c.SubKind == 1 && c.Arg1 == 0 || c.SubKind == 3 && c.Arg1 == 1, // kind 9: sub kind 2 with arguments 1 to 3, the guild id 9/1/0, the castle owner 9/3/1
+        18 => true, // kind 18: a date
         13 => c.SubKind is 1 or 4, // kind 13: sub kinds 1 and 4
-        15 => c.SubKind == 1, // kind 15: sub kind 1
+        15 => c.SubKind is >= 1 and <= 3, // kind 15: sub kinds 1 to 3
         14 => c.Arg1 is 1 or 2, // kind 14: arguments 1 and 2
         10 => c.Arg1 == 1, // kind 10: argument 1
         3 => c.Arg1 == 3, // kind 3: argument 3
         4 => c.SubKind == 1 && c.Arg1 is 1 or 2, // kind 4: sub kind 1, arguments 1 and 2
         19 => c.Arg1 is 1 or 2, // kind 19: arguments 1 and 2
+        20 => c.SubKind == 2, // kind 20: sub kind 2 (the day of the week)
         _ => false, // any other kind: not implemented
     };
 

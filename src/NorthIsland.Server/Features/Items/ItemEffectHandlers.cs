@@ -89,6 +89,14 @@ public sealed class ItemEffectHandlers(
     /// <summary>The lowest value an ability can be forgotten down to, by potential.</summary>
     internal static readonly ImmutableArray<ushort> PotentialFloor = [0, 1, 2, 3, 4, 6, 9, 13, 18, 24, 31, 39, 48];
 
+    /// <summary>How far above its potential floor a character's ability may be raised with stat points, as the client's status window allows.</summary>
+    public const int AbilityRoom = 602;
+
+    /// <summary>The highest value stat points can raise an ability to: its potential floor plus <see cref="AbilityRoom"/> (602 to 650).</summary>
+    /// <param name="potential">The potential level.</param>
+    /// <returns>The cap.</returns>
+    internal static int AbilityCap(byte potential) => PotentialFloor[Math.Min(potential, (byte)(PotentialFloor.Length - 1))] + AbilityRoom;
+
     /// <summary>
     /// Uses an item that has an effect handled here, or hands it to the handler of its feature.
     /// </summary>

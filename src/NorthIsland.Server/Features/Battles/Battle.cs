@@ -182,20 +182,24 @@ public sealed class Battle
     /// <summary>Finds the fighters a skill's target area reaches around the chosen fighter, on the chosen fighter's side.</summary>
     /// <param name="chosen">The fighter the skill was cast on; always part of the area.</param>
     /// <param name="area">
-    /// The Skill.dat area code: 2 adds the fighter in the other row of the same column, 3 the fighters above and below in the same row,
-    /// 4 both, 6 and 7 the three columns around the chosen fighter in both rows, 8 every fighter of the side; any other code is the chosen
-    /// fighter alone.
+    /// The Skill.dat area code, with the shapes of the client's hit marking: 2 adds the fighter in the other row of the same column,
+    /// 3 the fighters above and below in the same row, 4 both, 5 the whole row, 6 the three columns around the chosen fighter in the back
+    /// row when the chosen fighter stands in the front row, 7 the three columns around the chosen fighter in both rows, 8 every fighter of
+    /// the side; any other code is the chosen fighter alone.
     /// </param>
     /// <returns>The chosen fighter, then the living fighters of the other cells of the area.</returns>
     public List<Fighter> AreaAround(Fighter chosen, byte area)
     {
         (int Row, int Col) facing = (chosen.Row is 1 or 3 ? chosen.Row + 1 : chosen.Row - 1, chosen.Col); // rows 1-2 and 3-4 face each other on a side
+        var front = chosen.Row is 2 or 3; // rows 2 and 3 are the front rows
         (int Row, int Col)[] cells = area switch
         {
             2 => [facing],
             3 => [(chosen.Row, chosen.Col - 1), (chosen.Row, chosen.Col + 1)],
             4 => [facing, (chosen.Row, chosen.Col - 1), (chosen.Row, chosen.Col + 1)],
-            6 or 7 => [facing, (chosen.Row, chosen.Col - 1), (chosen.Row, chosen.Col + 1), (facing.Row, chosen.Col - 1), (facing.Row, chosen.Col + 1)],
+            5 => [.. Enumerable.Range(1, 4).Select(c => (chosen.Row, c))],
+            6 when front => [facing, (facing.Row, chosen.Col - 1), (facing.Row, chosen.Col + 1)],
+            7 => [facing, (chosen.Row, chosen.Col - 1), (chosen.Row, chosen.Col + 1), (facing.Row, chosen.Col - 1), (facing.Row, chosen.Col + 1)],
             _ => [],
         };
         var others = All.Where(f => f.IsAlive && f.Side == chosen.Side && !ReferenceEquals(f, chosen));
@@ -205,7 +209,17 @@ public sealed class Battle
     /// <summary>Tells whether a Skill.dat area code reaches more than the chosen fighter.</summary>
     /// <param name="area">The area code.</param>
     /// <returns>True for the codes <see cref="AreaAround"/> spreads over.</returns>
-    public static bool IsSpread(byte area) => area is 2 or 3 or 4 or 6 or 7 or 8;
+    public static bool IsSpread(byte area) => area is >= 2 and <= 8;
+
+    /// <summary>Tells the clients which cells around its target a fighter's next action reaches, before the action is sent.</summary>
+    /// <param name="attacker">The fighter about to act.</param>
+    /// <param name="area">The Skill.dat area code of the action; 1 for an action on its target alone.</param>
+    /// <remarks>
+    /// The client keeps the area on the fighter and shows an action's values only on the fighters of it, so it is sent before every action,
+    /// single-target ones included. The client's codes are the Skill.dat codes less one.
+    /// </remarks>
+    public void SendAttackArea(Fighter attacker, byte area = 1) =>
+        Send(BattleMessages.AttackArea(attacker.Row, attacker.Col, IsSpread(area) ? (byte)(area - 1) : (byte)0));
 
     /// <summary>Every fighter still present: the players, their pets and the monsters.</summary>
     public IEnumerable<Fighter> All => OwnSide.Concat(Monsters);

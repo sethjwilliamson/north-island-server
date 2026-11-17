@@ -19,7 +19,21 @@ public sealed partial class EventEngine
     public void EnterMap(GameSession session)
     {
         var character = session.ActiveCharacter!;
+        if (session.Event is { WaitsForEntry: true } moved && moved.MapId == character.MapId)
+        {
+            // Back on the same map after a move inside it: the NPC states stay, the client hears them again, and the event goes on.
+            moved.WaitsForEntry = false;
+            foreach (var (role, state) in session.NpcStates)
+                session.Send(EventMessages.NpcState(role, state));
+            // the shows and hides too: the client loaded the map again and has its NPCs as the scene places them
+            foreach (var (role, (shown, seconds)) in session.NpcVisibility)
+                session.Send(shown ? EventMessages.NpcShowFor(role, (ushort)Math.Clamp(seconds, 0, ushort.MaxValue)) : EventMessages.NpcHide(role, seconds));
+            logger.LogInformation("[{Session}] {Source}: the map has loaded, the event goes on", session.Id, moved.Source);
+            Advance(session);
+            return;
+        }
         session.NpcStates.Clear();
+        session.NpcVisibility.Clear();
         var scene = maps.Scene(character.MapId);
         if (scene is null)
             return;
@@ -38,6 +52,10 @@ public sealed partial class EventEngine
             GuildId = guilds.Of(session.Account!.LoginId)?.Id ?? 0,
             TeamWithoutGuild = TeamOrSelf(session.Account!.LoginId).Count(id => guilds.Of(id) is null),
             ScriptNow = ScriptClock(character.MapId),
+            Clock = () => calendar.Clock(),
+            RidingVehicle = session.Vehicle is { Riding: true } vehicle ? vehicle.ItemId : (ushort)0,
+            RoomFor = id => World.Bag.IsStackable(items[id]) && character.Bag.Exists(b => b.ItemId == id && b.Count < World.Bag.MaxStack)
+                || World.Bag.FreeSlot(character, items, id) != 0,
         };
         foreach (var ev in scene.LeadEvents)
             foreach (var group in ConditionEvaluator.Groups(ev))

@@ -63,42 +63,55 @@ public static class Pets
                         : null);
 
     /// <summary>
-    /// Raises a pet to a higher level: every ability grows, the highest one also gets the bonus, and HP and SP are recalculated and refilled.
+    /// Raises a pet to a higher level: each level gives its points one at a time to a random ability that is still below the cap of the pet's
+    /// potential (its potential floor plus <see cref="ItemEffectHandlers.PetAbilityRoom"/>), with each ability's chance in proportion to its
+    /// current value (a pet with INT 50 and AGI 1 puts a point on AGI 1 time in 51), then HP and SP are recalculated and refilled.
     /// </summary>
     /// <param name="pet">The pet.</param>
     /// <param name="level">The new level; nothing happens when it is not above the current one.</param>
     /// <param name="f">The formula table, for max HP and SP.</param>
-    /// <param name="statsPerLevel">The points every ability gains per level.</param>
-    /// <param name="bonusPerLevel">The extra points the highest ability gains per level.</param>
+    /// <param name="pointsPerLevel">The ability points the pet gains per level.</param>
+    /// <param name="roll">Picks a number from 0 up to but not including its argument; tests replace it.</param>
     /// <returns>True when the pet gained levels.</returns>
     public static bool LevelUp(
         Pet pet,
         byte level,
         FormulaTable f,
-        int statsPerLevel,
-        int bonusPerLevel)
+        int pointsPerLevel,
+        Func<int, int> roll)
     {
         if (level <= pet.Level)
             return false;
-        var levels = level - pet.Level;
+        var points = (level - pet.Level) * Math.Max(0, pointsPerLevel);
         pet.Level = level;
-        var each = levels * statsPerLevel;
-        var bonus = levels * bonusPerLevel;
-        var highest = new[] { pet.Strength, pet.Constitution, pet.Intelligence, pet.Wisdom, pet.Agility }.Max();
-        ushort Grow(ushort stat, bool isHighest) => (ushort)Math.Min(ushort.MaxValue, stat + each + (isHighest ? bonus : 0));
-        var given = false;
-        bool Take(ushort stat)
+        var cap = ItemEffectHandlers.PotentialFloor[Math.Min(pet.Potential, (byte)(ItemEffectHandlers.PotentialFloor.Length - 1))]
+            + ItemEffectHandlers.PetAbilityRoom;
+        ushort[] abilities = [pet.Strength, pet.Constitution, pet.Intelligence, pet.Wisdom, pet.Agility];
+        for (var i = 0; i < points; i++)
         {
-            if (given || stat != highest)
-                return false;
-            given = true;
-            return true;
+            var room = Enumerable.Range(0, abilities.Length).Where(a => abilities[a] < cap).ToList();
+            if (room.Count == 0)
+                break;
+            // a number below the sum of the open abilities picks the ability whose share it falls in; all at 0 share equally
+            var weight = room.Sum(a => abilities[a]);
+            var pick = weight == 0 ? room[roll(room.Count)] : room[0];
+            if (weight > 0)
+            {
+                var at = roll(weight);
+                foreach (var a in room)
+                {
+                    if (at < abilities[a])
+                    {
+                        pick = a;
+                        break;
+                    }
+                    at -= abilities[a];
+                }
+            }
+            abilities[pick]++;
         }
-        pet.Strength = Grow(pet.Strength, Take(pet.Strength));
-        pet.Constitution = Grow(pet.Constitution, Take(pet.Constitution));
-        pet.Intelligence = Grow(pet.Intelligence, Take(pet.Intelligence));
-        pet.Wisdom = Grow(pet.Wisdom, Take(pet.Wisdom));
-        pet.Agility = Grow(pet.Agility, Take(pet.Agility));
+        (pet.Strength, pet.Constitution, pet.Intelligence, pet.Wisdom, pet.Agility) =
+            (abilities[0], abilities[1], abilities[2], abilities[3], abilities[4]);
         var total = FormulaTable.TotalLevel(pet.Level, pet.Reborn);
         pet.MaxHp = f.MaxHp(total, pet.Constitution, 0, 0);
         pet.MaxSp = f.MaxSp(total, pet.Wisdom, 0, 0);

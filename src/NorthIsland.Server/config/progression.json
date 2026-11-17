@@ -16,7 +16,6 @@
     "PetAmityPerLevel": 1,
     "PetRunAwayAmity": 20,
     "PetRunAwayChancePercent": 50,
-    "PetStatsPerLevel": 1,
-    "PetBonusStatsPerLevel": 2
+    "PetStatsPerLevel": 1
   }
 }

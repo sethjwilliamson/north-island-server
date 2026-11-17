@@ -11,4 +11,7 @@ public static class Action50
 
     /// <summary>Client to server: an item command in a battle.</summary>
     public const byte Item = 2;
+
+    /// <summary>Server to client: which cells around its target a fighter's next action reaches.</summary>
+    public const byte AttackArea = 6;
 }

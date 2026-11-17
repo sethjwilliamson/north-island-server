@@ -63,15 +63,15 @@ public sealed class CareerHandlers(
         }
         if (c.Marks.RemoveAll(m => m.Id == Career.TrialMark) > 0)
             session.Send(MarkMessages.Delete(Career.TrialMark));
-        marks.TrySetFlag(session, c, Career.TrialFlag, on: true);
+        var flagged = marks.TrySetFlag(session, c, Career.TrialFlag, on: true);
         SendProgress(session, c);
         SendJob(session, c);
         combat.Send(session);
         var levelUp = PlayerMessages.LevelUp(session.Account!.LoginId);
         session.Send(levelUp);
         world.Broadcast(session, levelUp, sameMapOnly: true);
-        logger.LogInformation("[{Session}] {Name} is reborn as job {Job}: level {Old} -> {Level} (total {OldTotal} -> {Total}), manteau {Manteau}",
-            session.Id, c.Name, job, oldLevel, c.Level, oldTotal, Career.TotalLevel(c), manteau);
+        logger.LogInformation("[{Session}] {Name} is reborn as job {Job}: level {Old} -> {Level} (total {OldTotal} -> {Total}), manteau {Manteau}, flag {Flag} {State}",
+            session.Id, c.Name, job, oldLevel, c.Level, oldTotal, Career.TotalLevel(c), manteau, Career.TrialFlag, flagged ? "on" : "not set");
         return ValueTask.CompletedTask;
     }
 

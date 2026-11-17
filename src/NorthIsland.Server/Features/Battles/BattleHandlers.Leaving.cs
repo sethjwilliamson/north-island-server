@@ -95,6 +95,7 @@ public sealed partial class BattleHandlers
     /// <param name="player">The fighter who failed to flee.</param>
     private async Task FailToFleeAsync(GameSession session, Battle battle, Fighter player)
     {
+        battle.SendAttackArea(player);
         battle.Send(client => BattleMessages.Action(player.Row, player.Col, SkillTable.FailToFlee,
             [new ActionTarget(player.Row, player.Col, Hit: false, Guard: 0, [])], client));
         logger.LogInformation("[{Session}] {Player} fails to flee", session.Id, player.Name);
@@ -208,6 +209,7 @@ public sealed partial class BattleHandlers
         pet?.Left = true;
         if (ReferenceEquals(player, battle.Player) && session.Event is { } run)
             run.BattleOutcome = outcome;
+        TrojanRoundWon(session, battle, player, outcome);
 
         if (session.ActiveCharacter is { } character)
         {

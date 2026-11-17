@@ -49,6 +49,15 @@ public static class BattleMessages
         return packet.ToArray();
     }
 
+    /// <summary>Builds a 50/6 packet that sets which cells around its target a fighter's next action reaches.</summary>
+    /// <param name="row">Battle row of the fighter.</param>
+    /// <param name="col">Battle column of the fighter.</param>
+    /// <param name="area">The client's area code, the Skill.dat area code less one; 0 is the target alone.</param>
+    /// <returns>The packet.</returns>
+    /// <remarks>The client shows an action's values only on the fighters of this area, so it must come before the 50/1 action.</remarks>
+    public static byte[] AttackArea(byte row, byte col, byte area) =>
+        new PacketWriter(Action50.Code, Action50.AttackArea).U8(row).U8(col).U8(area).ToArray();
+
     /// <summary>Builds the packet that puts a status on the fighter in a cell.</summary>
     /// <param name="row">Battle row of the fighter.</param>
     /// <param name="col">Battle column of the fighter.</param>
