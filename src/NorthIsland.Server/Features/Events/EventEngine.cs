@@ -350,8 +350,11 @@ public sealed partial class EventEngine(
                     }
                     if (target == EventArenas.LobbyMapId && EventArenas.IsArena(run.MapId) && session.ActiveCharacter is { } leaver)
                         marks.SendRemoved(session, EventArenas.ClearRun(leaver, EventArenas.ProgressMarks(run.MapId)));
-                    world.ChangeMap(session, new DoorWarp(target, (ushort)Math.Clamp(convey.X, 0, ushort.MaxValue),
-                        (ushort)Math.Clamp(convey.Y, 0, ushort.MaxValue), (ushort)convey.Index));
+                    // the Carnie exit takes the player back to where they came to Carnie from, when that place was kept
+                    var carnieBack = session.ActiveCharacter is { } visitor ? CarnieReturn.Exit(visitor, run.MapId, target) : null;
+                    world.ChangeMap(session, carnieBack is not null && maps.InstanceOfMap(carnieBack.MapId) is null ? carnieBack
+                        : new DoorWarp(target, (ushort)Math.Clamp(convey.X, 0, ushort.MaxValue), (ushort)Math.Clamp(convey.Y, 0, ushort.MaxValue),
+                            (ushort)convey.Index));
                     if (target == run.MapId)
                     {
                         // A move inside the map: the group's later results (show NPCs, marks, items) still belong to this map,

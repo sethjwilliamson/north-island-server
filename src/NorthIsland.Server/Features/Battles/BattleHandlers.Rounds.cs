@@ -59,6 +59,7 @@ public sealed partial class BattleHandlers
             if (await TickStatusesAsync(session, battle).ConfigureAwait(false))
                 return;
             await FlushKnockOffsAsync(battle).ConfigureAwait(false);
+            await TrainingIslandHealAsync(session, battle).ConfigureAwait(false);
             if (battle.IsPvp && TryFinish(session, battle))
                 return;
             if (!battle.ActivePlayers.Any())

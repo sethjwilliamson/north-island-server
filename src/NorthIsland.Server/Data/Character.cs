@@ -297,6 +297,9 @@ public sealed class Character
     /// <summary>The Npc.dat id of the pet that joins battles; 0 for none.</summary>
     public ushort ActivePetId { get; set; }
 
+    /// <summary>The slot of the pet the character rides, kept over a logout; 0 for none.</summary>
+    public byte RidingPetSlot { get; set; }
+
     /// <summary>The friend list.</summary>
     public List<FriendEntry> Friends { get; set; } = [];
 
@@ -432,4 +435,13 @@ public sealed class Character
 
     /// <summary>The y position the character returns to when leaving an instance.</summary>
     public ushort InstanceReturnY { get; set; }
+
+    /// <summary>The map the character came to Carnie from, where the Carnie exit sends it back; 0 for none.</summary>
+    public ushort CarnieReturnMapId { get; set; }
+
+    /// <summary>The x position the character came to Carnie from.</summary>
+    public ushort CarnieReturnX { get; set; }
+
+    /// <summary>The y position the character came to Carnie from.</summary>
+    public ushort CarnieReturnY { get; set; }
 }

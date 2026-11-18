@@ -26,6 +26,8 @@ public sealed partial class BattleHandlers
             if (battle.Phase != BattlePhase.Command || battle.OwnAt(command.ActorRow, command.ActorCol) is not { IsAlive: true } actor
                 || !ReferenceEquals(actor.Session, session) || actor.SummonedRound == battle.Round || !battle.Commands.TryAdd(actor, command))
                 return ValueTask.CompletedTask;
+            if (!isItem && (SkillTable.IsNormalAttack(command.SkillOrItem) || IsPetNormalAttack(actor, command.SkillOrItem)))
+                actor.NormalAttackId = command.SkillOrItem; // the weapon's attack the client chose, used for this fighter's counters
             logger.LogInformation("[{Session}] round {Round}: {Actor} ({Row},{Col}) uses {What} {Id} on ({TargetRow},{TargetCol})", session.Id,
                 battle.Round,
                 actor.Name,

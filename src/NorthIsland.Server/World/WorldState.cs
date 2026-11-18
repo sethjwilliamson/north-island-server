@@ -212,6 +212,7 @@ public sealed class WorldState(
         var character = session.ActiveCharacter!;
         var id = PlayerId(session);
         MapLeaving?.Invoke(session);
+        MapChanging?.Invoke(session, warp);
         StopAutoCollect(session);
         TradeHandlers.Abort(session);
         PetTradeHandlers.Abort(session);
@@ -309,6 +310,9 @@ public sealed class WorldState(
 
     /// <summary>Called just before a player moves to another map.</summary>
     public Action<GameSession>? MapLeaving { get; set; }
+
+    /// <summary>Called just before a player moves to another map, with the destination; the character still holds the old map and spot.</summary>
+    public Action<GameSession, DoorWarp>? MapChanging { get; set; }
 
     /// <summary>Called with two sessions when they come to share a map, so features can show each other their state.</summary>
     public Action<GameSession, GameSession>? PlayersMet { get; set; }

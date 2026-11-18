@@ -222,6 +222,8 @@ public sealed partial class BattleHandlers
             BreakSleep(battle, hit);
         foreach (var fallen in area.Where(f => !f.IsAlive))
             await KnockOffAsync(battle, fallen).ConfigureAwait(false);
+        if (area.Count == 1)
+            await TryCounterAsync(session, battle, player, area[0], skillId, skill).ConfigureAwait(false);
     }
 
     /// <summary>Finds the enemy an attack command aims at.</summary>
@@ -551,6 +553,8 @@ public sealed partial class BattleHandlers
             hit.Statuses.Clear();
             logger.LogInformation("[{Session}] {What} {Name} is down", session.Id, hit.OwnedPet is null ? "player" : "pet", hit.Name);
         }
+        if (area.Count == 1)
+            await TryCounterAsync(session, battle, monster, area[0], skillId, skill).ConfigureAwait(false);
     }
 
     /// <summary>What a monster is going to do this round.</summary>

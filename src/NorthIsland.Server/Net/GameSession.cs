@@ -126,14 +126,25 @@ public sealed class GameSession : IAsyncDisposable
     /// <summary>True while the player's auto-collect is running.</summary>
     public bool AutoCollecting { get; set; }
 
-    /// <summary>The bag slot of the pet the player is riding; 0 when none.</summary>
-    public byte RidingPetSlot { get; set; }
+    /// <summary>The slot of the pet the player is riding; 0 when none. Kept on the character, so it is saved and still set after a new login.</summary>
+    public byte RidingPetSlot
+    {
+        get => ActiveCharacter?.RidingPetSlot ?? 0;
+        set
+        {
+            if (ActiveCharacter is { } character)
+                character.RidingPetSlot = value;
+        }
+    }
 
     /// <summary>Called with the attribute, its value and its second value whenever an attribute packet is sent to this session.</summary>
     public Action<byte, int, int>? AttributeSent { get; set; }
 
     /// <summary>True while auto play is on for the player.</summary>
     public bool AutoPlay { get; set; }
+
+    /// <summary>True from when the owner's client was asked for its saved house song (<c>62/59</c> sub 2) until it answers.</summary>
+    public bool HouseSongAsked { get; set; }
 
     /// <summary>Gives the per-session state object of a feature, creating it on first use.</summary>
     /// <typeparam name="T">The state class; it needs a parameterless constructor.</typeparam>

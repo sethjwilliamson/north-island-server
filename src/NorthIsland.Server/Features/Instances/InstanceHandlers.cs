@@ -44,6 +44,7 @@ public sealed class InstanceHandlers(
     internal void Start()
     {
         world.Arrived += Arrived;
+        world.MapChanging += RememberEntry;
         _timer = new Timer(_ => Tick(GameClock.UtcNow), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
     }
 
@@ -417,10 +418,23 @@ public sealed class InstanceHandlers(
             }
         }
         Start(instance, GameClock.UtcNow);
-        if (maps.InstanceOfMap(character.MapId) is null)
-            (character.InstanceReturnMapId, character.InstanceReturnX, character.InstanceReturnY) = (character.MapId, character.X, character.Y);
         session.Event = null;
         world.ChangeMap(session, new DoorWarp(instance.MapId, instance.Scene.EntryX, instance.Scene.EntryY, 0));
+    }
+
+    /// <summary>
+    /// Stores where a player came from when a map change takes them from a map outside the instances onto an instance map. It runs for every
+    /// moved player, so the team members the leader takes along keep their own return point too.
+    /// </summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="warp">The destination of the map change.</param>
+    private void RememberEntry(GameSession session, DoorWarp warp)
+    {
+        if (session.ActiveCharacter is not { } character || maps.InstanceOfMap(warp.MapId) is null || maps.InstanceOfMap(character.MapId) is not null)
+            return;
+        // a house room cannot be warped back to without its room details: such a player goes to the spawn point instead
+        (character.InstanceReturnMapId, character.InstanceReturnX, character.InstanceReturnY) =
+            session.HouseRoom != 0 ? ((ushort)0, (ushort)0, (ushort)0) : (character.MapId, character.X, character.Y);
     }
 
     /// <summary>Starts a waiting instance: records the time, tells the members and removes its row from the lists.</summary>
@@ -452,17 +466,17 @@ public sealed class InstanceHandlers(
         if (session.ActiveCharacter is not { } character || instances.ByMap(character.MapId) is not { } instance)
             return;
         List<(ushort Role, bool Hidden)> npcs = [];
-        int? seconds;
+        int? minutes;
         lock (instance.Lock)
         {
             if (instance.Member(Id(session)) is { } member)
                 npcs = [.. instance.NpcHidden.Select(n => (n.Key, n.Value)), .. member.Hidden.Select(role => (role, true))];
-            seconds = instance.EndsUtc is { } ends ? (int)Math.Max(0, (ends - GameClock.UtcNow).TotalSeconds) : null;
+            minutes = instance.MinutesLeft(GameClock.UtcNow);
         }
         foreach (var (role, hidden) in npcs)
             session.Send(VisibilityPacket(role, hidden));
-        if (seconds is { } s)
-            session.Send(InstanceMessages.RemainTime(s));
+        if (minutes is { } m)
+            session.Send(InstanceMessages.RemainTime(m));
     }
 
     /// <summary>Sends a page of the member list of the player's instance.</summary>
@@ -489,8 +503,8 @@ public sealed class InstanceHandlers(
         List<byte[]> packets = [];
         lock (instance.Lock)
         {
-            if (instance.EndsUtc is { } ends)
-                packets.Add(InstanceMessages.RemainTime((int)Math.Max(0, (ends - GameClock.UtcNow).TotalSeconds)));
+            if (instance.MinutesLeft(GameClock.UtcNow) is { } minutes)
+                packets.Add(InstanceMessages.RemainTime(minutes));
             packets.AddRange(GoalPackets(instance));
         }
         foreach (var p in packets)

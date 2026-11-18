@@ -21,6 +21,32 @@ public sealed class TransmitRoutes(
     /// <summary>The name of the seabed scene the submarine dives to.</summary>
     public const string Seabed = "Seabed";
 
+    /// <summary>The place number of "Earth" in the landing craft's list.</summary>
+    public const int EarthIndex = 1;
+
+    /// <summary>
+    /// The maps of space: the planet scenes and every map their doors lead on to (the Moon's Luna's Path and Luna's Palace). The planets' first
+    /// convey ("類點1", an unnamed placeholder) is left out: it leads to map 10008 "Test", the developers' test room, not to Earth.
+    /// </summary>
+    private readonly Lazy<HashSet<int>> _space = new(() =>
+    {
+        HashSet<int> space = [];
+        var planets = Planets.Skip(1).Select(maps.SceneIdByName).OfType<ushort>().ToList();
+        var placeholder = planets.Select(p => maps.Scene(p)?.Conveys is [var first, ..] ? first.TargetMapId : (ushort?)null).FirstOrDefault(t => t is not null);
+        Queue<int> next = new(planets.Select(p => (int)p));
+        while (next.TryDequeue(out var map))
+            if (space.Add(map))
+                foreach (var convey in maps.Scene(map)?.Conveys ?? [])
+                    if (convey.TargetMapId != placeholder)
+                        next.Enqueue(convey.TargetMapId);
+        return space;
+    });
+
+    /// <summary>Tells whether a map is in space: a planet or a map reached from one.</summary>
+    /// <param name="mapId">The map id.</param>
+    /// <returns>True for the planets and the maps behind their doors.</returns>
+    public bool IsSpace(int mapId) => _space.Value.Contains(mapId);
+
     /// <summary>Gives the kind of vehicle an item is.</summary>
     /// <param name="itemId">The item id.</param>
     /// <returns>1 village robot, 2 submarine, 3 landing craft, 0 for any other item.</returns>
@@ -65,13 +91,7 @@ public sealed class TransmitRoutes(
         {
             case 1: // village robot
                 return Landing(maps.SceneIdByName(Villages[index - 1]));
-            case 3 when index == 1: // landing craft
-                if (maps.SceneIdByName(Planets[1]) is { } moon && maps.Scene(moon)?.Conveys is [var home, ..])
-                    return new DoorWarp(
-                        home.TargetMapId,
-                        (ushort)Math.Clamp(home.X, 0, ushort.MaxValue),
-                        (ushort)Math.Clamp(home.Y, 0, ushort.MaxValue),
-                        (ushort)home.Index);
+            case 3 when index == EarthIndex: // landing craft: Earth is not a fixed place (TransmitHandlers.Earth)
                 return null;
             case 3: // landing craft
                 return Landing(maps.SceneIdByName(Planets[index - 1]));

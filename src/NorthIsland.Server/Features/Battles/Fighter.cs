@@ -114,6 +114,12 @@ public sealed class Fighter
     /// <summary>True while the fighter has chosen the defend command this round.</summary>
     public bool Defending { get; set; }
 
+    /// <summary>
+    /// For a player or pet, the normal attack id its client last sent in this battle (the client picks it from the weapon); 0 until one
+    /// was sent. A counter of a player or pet is played with it.
+    /// </summary>
+    public ushort NormalAttackId { get; set; }
+
     /// <summary>The session of a player or pet fighter; null for monsters and map NPCs.</summary>
     public GameSession? Session { get; init; }
 

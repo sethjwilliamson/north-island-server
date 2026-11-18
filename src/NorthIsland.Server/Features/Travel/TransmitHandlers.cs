@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NorthIsland.Protocol.Messages.World;
@@ -31,7 +32,8 @@ public sealed class TransmitHandlers(
         var index = body.Span[0];
         var vehicle = session.Vehicle is { Riding: true } riding ? c.Bag.Find(b => b.Slot == riding.BagSlot) : null;
         var kind = vehicle is null ? 0 : TransmitRoutes.KindOf(vehicle.ItemId);
-        var target = routes.Route(kind, index);
+        var earth = kind == 3 && index == TransmitRoutes.EarthIndex; // 3 landing craft
+        var target = earth ? Earth(session, c) : routes.Route(kind, index);
         string? refusal = kind == 0 ? "not riding a robot, submarine or landing craft"
             : target is null ? $"no place {index} for kind {kind}"
                 : kind == 2 && (maps.SceneType(c.MapId) == 14) != (index == 1) ? "the submarine's pick does not fit the scene" // 2 submarine
@@ -70,7 +72,31 @@ public sealed class TransmitHandlers(
             target!.MapId,
             target.X,
             target.Y);
+        if (earth) // back on Earth: forget the spot
+            _departures.Remove(session);
+        else if (kind == 3 && !routes.IsSpace(c.MapId)) // 3 landing craft leaving Earth; a trip between planets keeps the spot
+            _departures.AddOrUpdate(session, new Departure(new DoorWarp(c.MapId, c.X, c.Y, 0)));
         world.ChangeMap(session, target);
         return ValueTask.CompletedTask;
     }
+
+    /// <summary>The spot each rider left Earth from on the landing craft.</summary>
+    private readonly ConditionalWeakTable<GameSession, Departure> _departures = new();
+
+    /// <summary>A spot on Earth a landing craft trip started from.</summary>
+    /// <param name="Warp">The spot.</param>
+    private sealed record Departure(DoorWarp Warp);
+
+    /// <summary>
+    /// Finds where "Earth" takes a landing craft rider. The data gives no place: the planets' only door out (convey 1, an unnamed placeholder)
+    /// leads to map 10008 "Test", the developers' test room. The rider goes back to the spot they left Earth from; without one (they logged in
+    /// on a planet), to their recorded spot when it is on Earth, else to the starter's beach (the client's return spot choice 1). GUESS.
+    /// </summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="c">The player's character.</param>
+    /// <returns>The destination.</returns>
+    private DoorWarp Earth(GameSession session, Character c) =>
+        _departures.TryGetValue(session, out var left) ? left.Warp
+            : c.RecordMapId != 0 && !routes.IsSpace(c.RecordMapId) ? new DoorWarp(c.RecordMapId, c.RecordX, c.RecordY, 0)
+                : WorldHandlers.StartersBeach;
 }

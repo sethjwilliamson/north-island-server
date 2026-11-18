@@ -161,6 +161,16 @@ public sealed class WorldEntry(
             character.ActivePetId = 0;
         if (character.ActivePetId != 0)
             session.Send(PetMessages.Selected(character.ActivePetId));
+        if (character.RidingPetSlot != 0) // still on the pet ridden at logout: mounted as by 15/11 (the map is told by world.Enter)
+        {
+            if (character.Pets.Find(p => p.Slot == character.RidingPetSlot) is { } ridden)
+            {
+                session.Send(PetMessages.Mounted(ridden.Slot, session.Account!.LoginId, ridden.NpcId));
+                combat.Send(session);
+            }
+            else
+                character.RidingPetSlot = 0;
+        }
 
         Bag.SplitLegacyStacks(character, itemData);
         ItemHandlers.SendInventory(session, character);

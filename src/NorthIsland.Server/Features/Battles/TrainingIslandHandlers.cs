@@ -23,6 +23,14 @@ public sealed class TrainingIslandHandlers(
     /// <summary>Map id of the Training Island.</summary>
     public const ushort IslandMap = 13050; // Training Island
 
+    /// <summary>Map ids of the Training Island and the areas its doors lead to.</summary>
+    private const ushort FirstIslandMap = 13050, LastIslandMap = 13057; // 13050 Training Island, 13051 Beach Area, 13052 1st Cave Area, 13053 2nd Cave Area, 13054 1st Ocean Area, 13055 2nd Ocean Area, 13056 1st Forest Area, 13057 2nd Forest Area
+
+    /// <summary>Whether a map is the Training Island or one of its areas.</summary>
+    /// <param name="mapId">The map id.</param>
+    /// <returns>True for the island and every area reached through its doors.</returns>
+    public static bool IsIslandMap(int mapId) => mapId is >= FirstIslandMap and <= LastIslandMap;
+
     /// <summary>Coordinates on the Training Island where players arrive.</summary>
     public const int IslandX = 2632, IslandY = 1344;
 

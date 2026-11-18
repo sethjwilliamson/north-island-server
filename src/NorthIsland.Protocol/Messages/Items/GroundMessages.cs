@@ -17,7 +17,7 @@ public static class GroundMessages
             if (e.Gold > 0)
                 w.U8(2).U16(e.Index).I32(e.Gold).U16(e.X).U16(e.Y).I32(0);
             else
-                w.U8(1).U16(e.Index).I32(e.ItemId).U16(e.X).U16(e.Y).I32(0);
+                w.U8(1).U16(e.Index).I32(e.ItemId).U16(e.X).U16(e.Y).I32(e.Extra);
         }
         return w.ToArray();
     }
@@ -27,9 +27,10 @@ public static class GroundMessages
     /// <param name="x">X position.</param>
     /// <param name="y">Y position.</param>
     /// <param name="dropped">True to play the drop animation.</param>
+    /// <param name="extra">Pixels added to Y when the client sorts the item among characters and map objects.</param>
     /// <returns>The packet.</returns>
-    public static byte[] Add(ushort itemId, ushort x, ushort y, bool dropped = false) =>
-        new PacketWriter(Action23.Code, Action23.GroundAdd).U16(itemId).U16(x).U16(y).I32(0).U8(dropped ? (byte)1 : (byte)0).ToArray();
+    public static byte[] Add(ushort itemId, ushort x, ushort y, bool dropped = false, int extra = 0) =>
+        new PacketWriter(Action23.Code, Action23.GroundAdd).U16(itemId).U16(x).U16(y).I32(extra).U8(dropped ? (byte)1 : (byte)0).ToArray();
 
     /// <summary>Builds the packet that adds a gold pile to the ground.</summary>
     /// <param name="gold">Amount of gold.</param>

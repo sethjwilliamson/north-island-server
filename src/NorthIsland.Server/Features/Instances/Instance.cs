@@ -95,6 +95,14 @@ public sealed class Instance(
     /// <summary>The time the time limit ends; null while the instance is waiting or its scene has no time limit.</summary>
     public DateTime? EndsUtc => StartedUtc is { } s && Scene.Minutes > 0 ? s.AddMinutes(Scene.Minutes) : null;
 
+    /// <summary>
+    /// The whole minutes left, rounded up, as the client's instance window shows them (85/9 is read as minutes and counted down one a minute,
+    /// MZ_Menu.pas RecvDupRemainTime): until the instance closes once it is completed or expired, otherwise until the time limit ends.
+    /// </summary>
+    /// <param name="now">The current time.</param>
+    /// <returns>The minutes left; null while the instance is waiting or its scene has no time limit.</returns>
+    public int? MinutesLeft(DateTime now) => (ClosesUtc ?? EndsUtc) is { } end ? (int)Math.Ceiling(Math.Max(0, (end - now).TotalMinutes)) : null;
+
     /// <summary>Returns the progress of a goal.</summary>
     /// <param name="goal">The goal index.</param>
     /// <returns>The progress; 0 for an index outside the goals.</returns>

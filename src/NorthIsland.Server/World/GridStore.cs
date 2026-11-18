@@ -17,6 +17,17 @@ public static class GridStore
             && a.Extra == b.Extra
             && a.BoxItem == b.BoxItem;
 
+    /// <summary>
+    /// Whether items of a stack can be added onto another stack, the way the bag merges them (a bag move, <see cref="Bag.Add"/>, and the client's
+    /// CheckGridItemFit): a stackable item merges with any stack of the same item id, whatever its wear, box or other fields; an item that does not
+    /// stack only with a stack of the same kind (<see cref="Same"/>).
+    /// </summary>
+    /// <param name="a">The stack added onto.</param>
+    /// <param name="b">The stack the items come from.</param>
+    /// <param name="stackable">Whether the item stacks (<see cref="Bag.IsStackable"/>).</param>
+    /// <returns>True when they merge.</returns>
+    public static bool Stacks(BagItem a, BagItem b, bool stackable) => stackable ? a.ItemId == b.ItemId : Same(a, b);
+
     /// <summary>Makes a copy of a stack with another slot and count.</summary>
     /// <param name="b">The stack to copy.</param>
     /// <param name="slot">The slot of the copy.</param>
@@ -61,7 +72,7 @@ public static class GridStore
         var at = grid.Find(g => g.Slot == cell && !ReferenceEquals(g, ignore));
         if (at is not null)
         {
-            if (!stackable || !Same(at, from) || at.Count >= Bag.MaxStack)
+            if (!stackable || !Stacks(at, from, stackable) || at.Count >= Bag.MaxStack)
                 return null;
             if (exact && moved > Bag.MaxStack - at.Count)
                 return null;

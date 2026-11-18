@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NorthIsland.GameData.Items;
@@ -6,10 +7,10 @@ using NorthIsland.Protocol.Messages.World;
 
 namespace NorthIsland.Server.Features.Vehicles;
 
-/// <summary>Looks after the wear and fuel of the ridden vehicle: fuel items, refuelling and the once-a-minute tick.</summary>
+/// <summary>Looks after the wear and fuel of the ridden vehicle: fuel items, refuelling and the drain tick.</summary>
 /// <param name="items">The item records.</param>
 /// <param name="world">The online sessions, used to tell the map when a rider is put down.</param>
-/// <param name="options">The vehicle options (fuel and wear rates).</param>
+/// <param name="options">The vehicle options (drain rate, fuel per item).</param>
 /// <param name="logger">Logger for the handler's messages.</param>
 public sealed class VehicleCareHandlers(
     ItemData items,
@@ -74,33 +75,62 @@ public sealed class VehicleCareHandlers(
         return true;
     }
 
+    /// <summary>Where each rider was at the last drain tick, and on which boarding, so only riding that moves is drained.</summary>
+    private readonly ConditionalWeakTable<GameSession, RideSpot> _spots = new();
+
+    /// <summary>The rider's spot at the last drain tick.</summary>
+    private sealed class RideSpot
+    {
+        /// <summary>The boarding the spot belongs to; a new boarding starts afresh.</summary>
+        public PlacedVehicle? Ride { get; set; }
+
+        /// <summary>The map and position at the last tick.</summary>
+        public (ushort Map, ushort X, ushort Y) Spot { get; set; }
+    }
+
+    /// <summary>Tells whether a vehicle is never drained: Robinson's Raft, which the intro breaks when it lands (<see cref="VehicleHandlers.RobinsonsRaft"/>).</summary>
+    /// <param name="itemId">The vehicle's item id.</param>
+    /// <returns>True when riding it costs nothing.</returns>
+    public static bool NeverDrains(ushort itemId) => itemId == VehicleHandlers.RobinsonsRaft;
+
     /// <summary>
-    /// Applies one minute of fuel use and wear to the ridden vehicle and puts the rider down when the fuel is gone
-    /// or the vehicle is worn out.
+    /// Drains the ridden vehicle for the seconds since the last tick when the rider moved: the fuel goes first, then the health (the wear rises).
+    /// Sends the new wear and fuel (15/14). A vehicle whose wear reaches the most it can take is destroyed: the rider is put down (15/11) and the
+    /// map is shown the wreck (15/15, which also gives the owner "The vehicle has been destroyed"); the vehicle stays in the bag, worn out, for repair.
     /// </summary>
     /// <param name="session">The player's session.</param>
-    public void Tick(GameSession session)
+    /// <param name="seconds">The seconds since the last tick.</param>
+    public void Tick(GameSession session, double seconds)
     {
         var o = options.Value.Vehicles;
-        if (session.ActiveCharacter is not { } c || session.Vehicle is not { Riding: true } riding || (o.FuelPerMinute <= 0 && o.WearPerMinute <= 0)
-            || c.Bag.Find(b => b.Slot == riding.BagSlot) is not { } vehicle || items[vehicle.ItemId] is not { } record)
+        if (o.DrainPerSecond <= 0 || session.ActiveCharacter is not { } c || session.Vehicle is not { Riding: true } riding
+            || c.Bag.Find(b => b.Slot == riding.BagSlot) is not { } vehicle || items[vehicle.ItemId] is not { } record || NeverDrains(vehicle.ItemId))
             return;
-        var wear = o.WearPerMinute;
-        vehicle.Used = (int)Math.Min(MaxWear(record), vehicle.Used + Math.Round(wear));
-        if (o.FuelPerMinute > 0)
-            vehicle.Extra = (ushort)Math.Max(0, vehicle.Extra - (int)Math.Ceiling(o.FuelPerMinute));
+        var spot = _spots.GetOrCreateValue(session);
+        var here = (c.MapId, c.X, c.Y);
+        var moved = ReferenceEquals(spot.Ride, riding) && spot.Spot != here;
+        spot.Ride = riding;
+        spot.Spot = here;
+        if (!moved)
+            return;
+        var drain = Math.Max(1, (int)Math.Round(o.DrainPerSecond * seconds));
+        var fromFuel = Math.Min((int)vehicle.Extra, drain);
+        vehicle.Extra = (ushort)(vehicle.Extra - fromFuel);
+        var max = MaxWear(record);
+        vehicle.Used = Math.Min(max, vehicle.Used + drain - fromFuel);
         SendState(session, vehicle);
-        var dry = o.FuelPerMinute > 0 && vehicle.Extra == 0;
-        var worn = wear > 0 && vehicle.Used >= MaxWear(record);
-        if (!dry && !worn)
+        if (vehicle.Used < max)
             return;
+        var id = session.Account!.LoginId;
         session.Vehicle = null;
-        var off = VehicleMessages.Dismounted(vehicle.Slot, session.Account!.LoginId);
+        _spots.Remove(session);
+        var off = VehicleMessages.Dismounted(vehicle.Slot, id);
         session.Send(off);
         world.Broadcast(session, off, sameMapOnly: true);
         world.ClearPassengers(session);
-        if (dry)
-            session.Send(VehicleMessages.NoFuel());
-        logger.LogInformation("[{Session}] {Name}'s {Vehicle} stops: {Why}", session.Id, c.Name, record.Name.Trim(), dry ? "no fuel" : "worn out");
+        var wreck = VehicleMessages.Destroyed(id, vehicle.ItemId);
+        session.Send(wreck);
+        world.Broadcast(session, wreck, sameMapOnly: true);
+        logger.LogInformation("[{Session}] {Name}'s {Vehicle} is destroyed: worn out", session.Id, c.Name, record.Name.Trim());
     }
 }

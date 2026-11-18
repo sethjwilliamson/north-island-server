@@ -103,10 +103,10 @@ public static class InstanceMessages
     public static byte[] MemberJoined(byte pages, byte members, int id, ushort mapId) =>
         W(Action85.MemberJoined).U8(pages).U8(members).I32(id).U16(mapId).ToArray();
 
-    /// <summary>Builds 85/9/1, the time left.</summary>
-    /// <param name="seconds">Seconds left.</param>
+    /// <summary>Builds 85/9/1, the time left. The client stores the value as minutes and counts it down one a minute (RecvDupRemainTime).</summary>
+    /// <param name="minutes">Minutes left.</param>
     /// <returns>The packet.</returns>
-    public static byte[] RemainTime(int seconds) => W(Action85.RemainTime).U8(1).I32(seconds).ToArray();
+    public static byte[] RemainTime(int minutes) => W(Action85.RemainTime).U8(1).I32(minutes).ToArray();
 
     /// <summary>Builds 85/10/1, the progress of one goal.</summary>
     /// <param name="slot">Goal slot, 1 to 11.</param>

@@ -31,12 +31,14 @@ public sealed class GroundItems(
     /// <param name="Y">The y position.</param>
     /// <param name="Respawns">True for a thing from the map data, which comes back after it is taken.</param>
     /// <param name="Expires">When a dropped thing vanishes, null for a map thing.</param>
+    /// <param name="Extra">Pixels the client adds to Y when sorting it among characters and map objects (eve.Emg goods @72); 0 for a dropped thing.</param>
     private sealed record Slot(
         GroundThing Thing,
         ushort X,
         ushort Y,
         bool Respawns,
-        DateTime? Expires);
+        DateTime? Expires,
+        int Extra = 0);
 
     /// <summary>The ground of one map: its things by index and the taken map things waiting to come back.</summary>
     private sealed class MapGround
@@ -61,7 +63,7 @@ public sealed class GroundItems(
             entries = [.. Enumerable.Range(1, MaxIndex).Where(i => ground.Slots[i] is not null).Select(i =>
             {
                 var s = ground.Slots[i]!;
-                return new GroundEntry((ushort)i, s.Thing.ItemId, s.X, s.Y, s.Thing.Gold);
+                return new GroundEntry((ushort)i, s.Thing.ItemId, s.X, s.Y, s.Thing.Gold, s.Extra);
             })];
         if (entries.Count > 0)
             session.Send(GroundMessages.List(entries));
@@ -185,7 +187,7 @@ public sealed class GroundItems(
                 Broadcast(mapId, GroundMessages.Remove(index, animate: false));
             foreach (var slot in back)
             {
-                Broadcast(mapId, GroundMessages.Add(slot.Thing.ItemId, slot.X, slot.Y));
+                Broadcast(mapId, GroundMessages.Add(slot.Thing.ItemId, slot.X, slot.Y, extra: slot.Extra));
                 logger.LogInformation("Map {Map}: item {Item} back at ({X}, {Y})", mapId, slot.Thing.ItemId, slot.X, slot.Y);
             }
             if (expired.Count > 0)
@@ -211,7 +213,7 @@ public sealed class GroundItems(
         var goods = maps.Scene(id)?.Goods ?? [];
         var index = 1;
         foreach (var g in goods.Where(g => g.Unknown64 is > 0 and <= ushort.MaxValue).Take(MaxIndex))
-            ground.Slots[index++] = new Slot(new GroundThing((ushort)g.Unknown64, 1, 0), Clamp(g.X), Clamp(g.Y), Respawns: true, Expires: null);
+            ground.Slots[index++] = new Slot(new GroundThing((ushort)g.Unknown64, 1, 0), Clamp(g.X), Clamp(g.Y), Respawns: true, Expires: null, Extra: g.Unknown72);
         return ground;
     });
 

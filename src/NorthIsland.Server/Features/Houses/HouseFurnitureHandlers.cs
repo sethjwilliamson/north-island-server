@@ -320,6 +320,12 @@ public sealed class HouseFurnitureHandlers(
             return;
         if ((owner?.ActiveCharacter ?? tents.OwnerOfHouse(entrant.MapId)?.Character) is { HouseBgmIndex: > 0, HouseBgmFile: { } song } host)
             session.Send(HouseLifeMessages.HouseMusic(host.HouseBgmIndex, song));
+        else if (owner == session)
+        {
+            // no song chosen yet: the owner's client keeps its choice in a file of its own and is asked for it (its first answer is song 1)
+            session.HouseSongAsked = true;
+            session.Send(HouseLifeMessages.HouseMusicAsk());
+        }
         if (owner != session || session.ActiveCharacter is not { } c)
             return;
         foreach (var box in c.HouseBoxes)
@@ -335,7 +341,7 @@ public sealed class HouseFurnitureHandlers(
     private IEnumerable<GameSession> InHouse(GameSession session) =>
         world.OnMap(session.ActiveCharacter!.MapId).Append(session).Distinct();
 
-    /// <summary>Handles <c>62/61</c>: the owner picks a song for the house at the Music Center, and the house hears it.</summary>
+    /// <summary>Handles <c>62/61</c>: the owner picks a song for the house at the Music Center, or the owner's client answers with its saved song on entering, and the house hears it.</summary>
     /// <param name="session">The owner's session.</param>
     /// <param name="body">The song index (four bytes), then the song file name.</param>
     internal ValueTask OnMusic(GameSession session, ReadOnlyMemory<byte> body)
@@ -344,7 +350,10 @@ public sealed class HouseFurnitureHandlers(
             return ValueTask.CompletedTask;
         var index = new PacketReader(body.Span).I32();
         var file = GameEncoding.GetString(body.Span[4..]).Trim();
-        var allowed = TentHandlers.HouseMapOf(session.Account.LoginId) == c.MapId && c.Furniture.Exists(f => f.ItemId == MusicCenter)
+        // the answer to the question asked on entering needs no Music Center: a house plays its owner's saved song without one
+        var asked = session.HouseSongAsked;
+        session.HouseSongAsked = false;
+        var allowed = TentHandlers.HouseMapOf(session.Account.LoginId) == c.MapId && (asked || c.Furniture.Exists(f => f.ItemId == MusicCenter))
             && index is >= 0 and <= 1000 && file.Length <= 40 && (index == 0 || file.Length > 0);
         if (!allowed)
         {

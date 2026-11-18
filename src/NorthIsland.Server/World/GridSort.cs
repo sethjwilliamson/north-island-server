@@ -36,9 +36,10 @@ public static class GridSort
         foreach (var b in loose)
         {
             var count = (int)b.Count;
-            if (box || Bag.IsStackable(items[b.ItemId]))
+            var stackable = Bag.IsStackable(items[b.ItemId]);
+            if (box || stackable)
             {
-                foreach (var into in merged.Where(m => GridStore.Same(m, b) && m.Count < maxStack))
+                foreach (var into in merged.Where(m => GridStore.Stacks(m, b, stackable) && m.Count < maxStack))
                 {
                     var moved = Math.Min(count, maxStack - into.Count);
                     into.Count += (byte)moved;

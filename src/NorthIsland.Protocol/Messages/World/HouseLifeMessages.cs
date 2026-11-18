@@ -194,6 +194,10 @@ public static class HouseLifeMessages
     public static byte[] HouseMusic(int index, string file) =>
         new PacketWriter(Action62.Code, Action62.HouseMusic).U8(1).I32(index).RawString(file).ToArray();
 
+    /// <summary>Builds the <c>62/59</c> packet that asks the owner's client for the house song it has saved; it answers with <c>62/61</c>.</summary>
+    /// <returns>The packet.</returns>
+    public static byte[] HouseMusicAsk() => new PacketWriter(Action62.Code, Action62.HouseMusic).U8(2).ToArray();
+
     /// <summary>Builds the <c>23</c> packet that plays one piano note.</summary>
     /// <param name="note">The note played.</param>
     /// <returns>The packet.</returns>
