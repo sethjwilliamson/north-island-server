@@ -101,6 +101,7 @@ public sealed class EggMachineHandlers(
         if (piece is null
             || !IsEggMachine(piece.ItemId)
             || stack is null
+            || session.Vehicle?.BagSlot == bagSlot
             || cell is < 1 or > Cells
             || piece.SalePrice > 0
             || piece.Stock.Exists(s => s.Pos == cell)

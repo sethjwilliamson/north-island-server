@@ -39,6 +39,13 @@
       "MinutesPerPoint": 3,
       "MaxPerVisit": 10,
       "PointsPerStep": 1
+    },
+    "Sitting": {
+      "Enabled": true,
+      "TickSeconds": 5,
+      "HpPerTick": 6,
+      "SpPerTick": 3,
+      "ActivePet": true
     }
   }
 }

@@ -67,6 +67,7 @@ public static class ServiceRegistration
         services.AddHostedService<BodyShiftTicker>();
         services.AddHostedService<NorthIsland.Server.Features.Guilds.TrojanWarTicker>();
         services.AddHostedService<HouseLifeTicker>();
+        services.AddHostedService<SittingTicker>();
         services.AddHostedService(sp => sp.GetRequiredService<NorthIsland.Server.World.NpcWander>());
         services.AddHostedService<ShutdownSignal>();
         return services;

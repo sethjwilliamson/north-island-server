@@ -222,7 +222,8 @@ public sealed class CompassHandlers(
             for (var place = 1; place <= finalists.Count; place++)
             {
                 finalists[place - 1].Session.Send(CompassMessages.Results(names));
-                quiz.GivePrize(finalists[place - 1].Session, place);
+                using (await finalists[place - 1].Session.ExclusiveAsync().ConfigureAwait(false)) // the prize goes in the bag between packets
+                    quiz.GivePrize(finalists[place - 1].Session, place);
             }
             logger.LogInformation("Golden Compass over: {Places}", string.Join(", ", finalists.Select(p => $"{p.Session.ActiveCharacter?.Name} {p.Score}")));
         }

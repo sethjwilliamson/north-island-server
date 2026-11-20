@@ -108,6 +108,7 @@ public sealed class PacketRouter(
         }
 
         var sub = payload.Length >= 2 ? payload[1] : (byte)0;
+        using var exclusive = await session.ExclusiveAsync().ConfigureAwait(false); // timers that change the bag wait for the packet to be handled
         var sent = session.BeginDispatch();
         try
         {

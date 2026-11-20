@@ -32,8 +32,8 @@ public static class ResultMapper
                 return new MappedResult(ResultAction.LearnSkill, Description: $"learn skill {r.SubKind}", Service: r.SubKind);
             case 14 when r.Arg1 == 1: // 14/s/1: start script cooldown SubKind for Value seconds
                 return new MappedResult(ResultAction.Cooldown, Description: $"cooldown {r.SubKind} for {r.Value} s", Service: r.SubKind, Convey: r.Value);
-            case 1 when r.SubKind == 7 && r.Arg1 is >= 1 and <= 255: // 1/7: the player plays action Arg1
-                return new MappedResult(ResultAction.PlayerAction, Description: $"player action {r.Arg1}", Service: r.Arg1);
+            case 1 when r.SubKind == 7 && r.Arg1 is >= 1 and <= 255: // 1/7: the player shows emotion Arg1 (K9 M1 O1, the player twin of 2/r/8)
+                return new MappedResult(ResultAction.PlayerEmotion, Description: $"player emotion {r.Arg1}", Service: r.Arg1);
             case 1 when r.SubKind == 8 && r.Arg1 == 2: // 1/8/2: charge a hire tier
                 return new MappedResult(ResultAction.Hire, Description: $"charge tier {r.Value}", Service: r.Value);
             case 1 when r.SubKind == 2: // 1/2: the player says a line
@@ -109,10 +109,10 @@ public static class ResultMapper
         3 => Client(new EventResult(0, 3, role, 4, r.Value, r.Arg2), $"show NPC {role}"), // 3 Mode, 4 Option
         5 => Client(new EventResult(0, 3, role, 5, r.Value, r.Arg2), $"NPC {role} state {r.Value}"), // 3 Mode, 5 Option
         6 => Client(new EventResult(6, 3, role, 0, 0, r.Arg2), $"dialog {r.Arg2} by NPC {role}"), // 6 Kind, 3 Mode
-        4 => new MappedResult(ResultAction.Packet, Description: $"NPC {role} emotion {r.Arg2}",
-            Packet: EventMessages.NpcEmotion(role, (byte)r.Arg2)), // NPC emotion
-        8 => new MappedResult(ResultAction.NpcAction, Description: $"NPC {role} action {r.Arg2}",
-            Packet: EventMessages.NpcAction(role, (byte)r.Arg2), Service: role), // NPC plays an action
+        8 => new MappedResult(ResultAction.Packet, Description: $"NPC {role} emotion {r.Arg2}",
+            Packet: EventMessages.NpcEmotion(role, (byte)r.Arg2)), // K9 M3 O1: NPC emotion (values 2..16, pictures E102..E116)
+        4 => new MappedResult(ResultAction.NpcAction, Description: $"NPC {role} action {r.Arg2}",
+            Packet: EventMessages.NpcAction(role, (byte)r.Arg2), Service: role), // K9 M3 O2: NPC plays an action (values are action group firsts 8, 16, 26, 46...)
         7 => new MappedResult(ResultAction.Packet, Description: $"NPC {role} action {r.Arg2} facing {r.Value}",
             Packet: EventMessages.NpcActionDir(role, (byte)r.Arg2, (byte)r.Value)), // NPC plays an action facing a direction
         9 when r.Arg2 is >= 1 and <= 3 => Client(new EventResult(4, 3, role, (byte)r.Arg2, r.Value, 0), $"NPC {role} moves"), // 4 Kind, 3 Mode

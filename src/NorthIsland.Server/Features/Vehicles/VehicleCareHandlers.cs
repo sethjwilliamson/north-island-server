@@ -62,7 +62,7 @@ public sealed class VehicleCareHandlers(
     public bool Refuel(GameSession session, Character c, ushort fuelItem)
     {
         if (session.Vehicle is not { Riding: true } riding
-            || c.Bag.Find(b => b.Slot == riding.BagSlot) is not { } vehicle
+            || riding.StackIn(c) is not { } vehicle
             || items[vehicle.ItemId] is not { } record
             || (record.Ints42.Length < 2 || (record.Ints42[0] != fuelItem && record.Ints42[1] != fuelItem)))
             return false;
@@ -104,7 +104,7 @@ public sealed class VehicleCareHandlers(
     {
         var o = options.Value.Vehicles;
         if (o.DrainPerSecond <= 0 || session.ActiveCharacter is not { } c || session.Vehicle is not { Riding: true } riding
-            || c.Bag.Find(b => b.Slot == riding.BagSlot) is not { } vehicle || items[vehicle.ItemId] is not { } record || NeverDrains(vehicle.ItemId))
+            || riding.StackIn(c) is not { } vehicle || items[vehicle.ItemId] is not { } record || NeverDrains(vehicle.ItemId))
             return;
         var spot = _spots.GetOrCreateValue(session);
         var here = (c.MapId, c.X, c.Y);

@@ -42,6 +42,15 @@ public sealed partial class BattleHandlers
                     what = gone.Count > 0 ? $"removes {string.Join(", ", gone.Select(s => s.Effect))}" : "removes nothing";
                     took |= gone.Count > 0;
                     break;
+                case ReviveType: // revive skills (type 8): bring a fallen fighter back with the heal amount of HP
+                    var back = f.IsAlive ? 0 : Math.Min(amount, f.MaxHp);
+                    f.Hp += back;
+                    if (back > 0)
+                        Revived(battle, f);
+                    values.Add(new FighterValue(BattleMessages.AttrHp, back, Negative: false));
+                    what = back > 0 ? $"revives with {back} HP" : "is not down";
+                    took |= back > 0;
+                    break;
                 case 6 or 7 or 14: // heal skills (types 6, 7, 14): restore SP, HP or both
                     (values, var hp, var sp, var healedTook) = Heal(battle, f, skill, amount);
                     what = $"restores {hp} HP, {sp} SP";
@@ -52,8 +61,9 @@ public sealed partial class BattleHandlers
                     var attr = StatusRules.AttrFor(skill.Effect, f);
                     if (player.IsHuman && attr != 0)
                         NoteBurstEffect(player, f, skill.Effect);
-                    hit = attr != 0 && !StatusRules.BlockedByDebuff(attr, player, f)
-                        && (f.Side == player.Side || GameRandom.Shared.Next(100) < BattleFormulas.StatusHitChancePercent);
+                    hit = attr != 0 && !StatusRules.BlockedByDebuff(skill.Effect, attr, player, f, options.Value.DebuffStacking)
+                        && (f.Side == player.Side || skill.Effect == StatusRules.Shrink // Shrink skips the hit roll
+                            || GameRandom.Shared.Next(100) < BattleFormulas.StatusHitChancePercent);
                     if (hit)
                     {
                         if (skill.Type is 4 or 19 && player.Kind == 2 && f.Kind == 4 && ReferenceEquals(f.Session, player.Session)) // 2 player, 4 pet
@@ -72,12 +82,17 @@ public sealed partial class BattleHandlers
         battle.Send(client => BattleMessages.Action(player.Row, player.Col, skill.Id, hits, client));
         if (took)
             TrainSkill(session, player, skill, target.Level);
-        foreach (var (f, s) in removed.Where(r => r.Status.Attr is StatusRules.Debuff2 or 227 or 228))
+        foreach (var (f, s) in removed.Where(r => !StatusRules.ClientCuresItself(r.Status)))
             SendStatusRemoval(battle, f, s);
         logger.LogInformation("[{Session}] {Player} uses {Skill} ({Cost} SP, {Sp} left) on {Target}: {What}", session.Id, player.Name,
             skill.Name, skill.SpCost, player.Sp, target.Name, string.Join("; ", whats));
         await ActionPause(skill.Id, player, area).ConfigureAwait(false);
     }
+
+    /// <summary>Takes a fighter who got back up off the queue of fighters to knock off the field.</summary>
+    /// <param name="battle">The battle.</param>
+    /// <param name="f">The revived fighter.</param>
+    private static void Revived(Battle battle, Fighter f) => battle.PendingKnockOffs.Remove(f);
 
     /// <summary>Restores a heal skill's SP, HP or both on one fighter, or puts its regeneration on.</summary>
     /// <param name="battle">The battle.</param>
@@ -118,7 +133,11 @@ public sealed partial class BattleHandlers
         if (target.Side != caster.Side)
         {
             if (StatusRules.IsDebuffEffect(effect))
-                caster.DebuffsCast.Add(effect);
+            {
+                if (!caster.DebuffsCast.TryGetValue(target, out var debuffs))
+                    caster.DebuffsCast[target] = debuffs = [];
+                debuffs.Add(effect);
+            }
         }
         else if (!StatusRules.IsDebuffEffect(effect))
             caster.BuffsGiven.Add((effect, target));
@@ -245,7 +264,7 @@ public sealed partial class BattleHandlers
     /// <returns>The damage, whether it was a critical hit, and whether it missed.</returns>
     private (int Damage, bool Critical, bool Missed) HitTarget(Fighter player, Fighter target, SkillRecord? skill, bool combo, int targets = 1)
     {
-        if (BattleFormulas.IsVoidAgainst(skill, target))
+        if (BattleFormulas.IsVoidAgainst(skill, target) || StatusRules.BlocksPhysical(target, skill))
         {
             NoteAction(player, target, 0);
             return (0, false, true);
@@ -297,7 +316,7 @@ public sealed partial class BattleHandlers
     private FighterValue? RiderStatus(Battle battle, Fighter attacker, Fighter target, SkillRecord? skill)
     {
         if (skill is not { Id: SkillTable.Fervidity } || !target.IsAlive || GameRandom.Shared.NextDouble() * 100 >= options.Value.FervidityMessPercent
-            || StatusRules.AttrFor(skill.Effect, target) is not (> 0 and var attr) || StatusRules.BlockedByDebuff(attr, attacker, target))
+            || StatusRules.AttrFor(skill.Effect, target) is not (> 0 and var attr) || StatusRules.BlockedByDebuff(skill.Effect, attr, attacker, target, options.Value.DebuffStacking))
             return null;
         NoteBurstEffect(attacker, target, skill.Effect);
         AddStatus(battle, target, skill, attr, 0);
@@ -421,7 +440,7 @@ public sealed partial class BattleHandlers
             {
                 if (skill is not null)
                     attacker.Sp -= skill.SpCost;
-                (damage, critical) = MonsterBlow(attacker, target, skill, combo: true);
+                (damage, critical, missed) = MonsterBlow(attacker, target, skill, combo: true);
             }
             var guard = !attacker.IsHuman && target.Defending ? (byte)1 : (byte)0;
             records.Add(new ActionRecord(attacker.Row, attacker.Col, member.SkillId,
@@ -535,12 +554,13 @@ public sealed partial class BattleHandlers
         List<ActionTarget> hits = [];
         foreach (var hit in area)
         {
-            var (damage, critical) = MonsterBlow(monster, hit, skill, combo: false, area.Count);
-            hits.Add(new ActionTarget(hit.Row, hit.Col, Hit: true, Guard: hit.Defending ? (byte)1 : (byte)0,
-                [new FighterValue(BattleMessages.AttrHp, damage, Negative: true, Critical: critical)]));
-            logger.LogInformation("[{Session}] {Monster} {How} {Player} for {Damage}{Critical}{Defended} ({Hp}/{Max} HP left)", session.Id, monster.Name,
+            var (damage, critical, missed) = MonsterBlow(monster, hit, skill, combo: false, area.Count);
+            // a blow Stone Wall voids is sent as a miss (no number) without the guard flag, so the client plays the wall's motion
+            hits.Add(new ActionTarget(hit.Row, hit.Col, Hit: !missed, Guard: !missed && hit.Defending ? (byte)1 : (byte)0,
+                BlowValues(damage, critical, missed, null)));
+            logger.LogInformation("[{Session}] {Monster} {How} {Player} for {Damage}{Critical}{Missed}{Defended} ({Hp}/{Max} HP left)", session.Id, monster.Name,
                 skill is null ? "hits" : $"uses {skill.Name} ({skill.SpCost} SP) on", hit.Name, damage, critical ? " (critical)" : "",
-                hit.Defending ? " (defending)" : "", hit.Hp, hit.MaxHp);
+                missed ? " (blocked by Stone Wall)" : "", hit.Defending ? " (defending)" : "", hit.Hp, hit.MaxHp);
         }
         battle.SendAttackArea(monster, areaCode);
         battle.Send(client => BattleMessages.Action(monster.Row, monster.Col, skillId, hits, client));
@@ -586,9 +606,11 @@ public sealed partial class BattleHandlers
     /// <param name="skill">The skill used, or null for a hand attack.</param>
     /// <param name="combo">True when the blow is part of a combination.</param>
     /// <param name="targets">The number of fighters the attack hits.</param>
-    /// <returns>The damage and whether it was a critical hit.</returns>
-    private (int Damage, bool Critical) MonsterBlow(Fighter monster, Fighter player, SkillRecord? skill, bool combo, int targets = 1)
+    /// <returns>The damage, whether it was a critical hit, and whether Stone Wall voided it.</returns>
+    private (int Damage, bool Critical, bool Missed) MonsterBlow(Fighter monster, Fighter player, SkillRecord? skill, bool combo, int targets = 1)
     {
+        if (StatusRules.BlocksPhysical(player, skill))
+            return (0, false, true);
         int raw;
         bool critical;
         if (options.Value.WindowDamage)
@@ -622,7 +644,7 @@ public sealed partial class BattleHandlers
         if (raw > 2L * player.MaxHp && player.Kind == 2) // player
             player.SentBack = true;
         player.Hp = Math.Max(0, player.Hp - raw);
-        return (raw, critical);
+        return (raw, critical, false);
     }
 
     /// <summary>Picks the skill a monster uses this turn, if any, and the monster it is used on.</summary>
@@ -644,7 +666,7 @@ public sealed partial class BattleHandlers
             {
                 1 or 2 => null, // damage skills: no support target
                 3 or 15 or 22 => Pick(enemies.Where(f => !f.HasEffect(s.Effect) && StatusRules.AttrFor(s.Effect, f) is > 0 and var a
-                    && !StatusRules.BlockedByDebuff(a, monster, f))), // status skill: a player-side target it can land on
+                    && !StatusRules.BlockedByDebuff(s.Effect, a, monster, f, options.Value.DebuffStacking))), // status skill: a player-side target it can land on
                 4 or 19 => s.TargetType == 3
                     ? (monster.HasEffect(s.Effect) ? null : monster)
                     : Pick(allies.Where(m => !m.HasEffect(s.Effect) && StatusRules.AttrFor(s.Effect, m) != 0)), // buff or shield: itself or an ally

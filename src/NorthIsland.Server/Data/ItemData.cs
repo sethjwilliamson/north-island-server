@@ -27,19 +27,8 @@ public sealed class ItemData
             }
             var table = ItemTable.Open(path);
             logger.LogInformation("Loaded {Count} items from {Path}", table.Items.Count, path);
-            var classes = EquipmentClasses.Load();
-            if (classes.Count > 0)
-            {
-                var given = 0;
-                table = table.Map(i =>
-                {
-                    if (i.Words142.Length == 0 || i.Words142[0] != Alchemy.EquipmentClass || !classes.TryGetValue(i.Id, out var c) || c.Name != i.Name.Trim())
-                        return i;
-                    given++;
-                    return i with { Words142 = c.Words };
-                });
-                logger.LogInformation("{Count} pieces of equipment got their alchemy class from the 2010 data", given);
-            }
+            table = EquipmentClasses.Apply(table, EquipmentClasses.Load(), out var given);
+            logger.LogInformation("{Count} pieces of equipment got their alchemy class from the equipment class tables", given);
             return table;
         });
         var compoundPath = Path.Combine(ServerPaths.Resolve(options.Value.GameDataDirectory), "Compound2.dat");

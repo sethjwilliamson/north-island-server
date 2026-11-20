@@ -35,13 +35,23 @@ public static class CarnieReturn
             : ((ushort)0, (ushort)0, (ushort)0);
     }
 
-    /// <summary>Returns where a warp out of the entrance hall to outside Carnie takes the player back to, if a place was remembered.</summary>
+    /// <summary>
+    /// Returns where a Carnie exit takes the player back to, if a place was remembered: Carnie's own exit (door 1, to the entrance hall) and
+    /// the entrance hall's way out both lead straight back to where the player came to Carnie from.
+    /// </summary>
     /// <param name="character">The player's character.</param>
     /// <param name="fromMap">The map the warp starts on.</param>
     /// <param name="target">The map the data's convey leads to.</param>
-    /// <returns>The warp back to the remembered place; null when the warp is not the Carnie exit or nothing was remembered.</returns>
+    /// <returns>The warp back to the remembered place; null when the warp is not a Carnie exit or nothing was remembered.</returns>
     public static DoorWarp? Exit(Character character, int fromMap, ushort target) =>
-        fromMap == EntranceHall && !IsCarnie(target) && character.CarnieReturnMapId != 0
+        IsExit(fromMap, target) && character.CarnieReturnMapId != 0
             ? new DoorWarp(character.CarnieReturnMapId, character.CarnieReturnX, character.CarnieReturnY, 0)
             : null;
+
+    /// <summary>Returns whether a warp leaves Carnie: from Carnie to its entrance hall, or from the entrance hall to outside Carnie.</summary>
+    /// <param name="fromMap">The map the warp starts on.</param>
+    /// <param name="target">The map the data's convey leads to.</param>
+    /// <returns>True for either exit.</returns>
+    private static bool IsExit(int fromMap, ushort target) =>
+        (fromMap == Carnie && target == EntranceHall) || (fromMap == EntranceHall && !IsCarnie(target));
 }

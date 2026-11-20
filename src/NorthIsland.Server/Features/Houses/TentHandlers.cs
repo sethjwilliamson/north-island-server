@@ -600,7 +600,8 @@ public sealed class TentHandlers(
     {
         var stack = character.Bag.Find(b => b.Slot == slot);
         var item = stack is null ? null : items[stack.ItemId];
-        if (stack is null || item is null || item.IsEquipment || item.Type == TentItemType || character.Furniture.Count >= Furniture.MaxPieces)
+        if (stack is null || item is null || item.IsEquipment || item.Type == TentItemType || character.Furniture.Count >= Furniture.MaxPieces
+            || session.Vehicle?.BagSlot == slot)
         {
             logger.LogWarning("[{Session}] {Name}: {What}: bag slot {Slot} cannot be used", session.Id, character.Name, what, slot);
             return null;
@@ -637,13 +638,19 @@ public sealed class TentHandlers(
             s.Send(packet);
     }
 
-    /// <summary>Builds the furniture record the client is sent, including the indexes of the tools on a piece.</summary>
+    /// <summary>
+    /// Builds the furniture record the client is sent, including the indexes of the tools on a piece. A tool on a work platform is sent with no
+    /// cell (0, 0, 0), as the tool-linked packet sends it: the client checks a placed record's last cell (x - 1, y - 1 for a tool, which has no
+    /// furniture size), so a tool sent with the cell of a platform against the left or back wall is refused and drops off the platform.
+    /// </summary>
     /// <param name="f">The furniture piece.</param>
     /// <param name="owner">The house owner's character.</param>
     /// <returns>The record.</returns>
     public static FurnitureRecord RecordOf(Furniture f, Character owner) =>
-        new(f.ItemId, f.X, f.Y, f.Z, f.Dir, f.Parent,
-            f.Parent == 0 ? [.. owner.Furniture.Where(t => t.Parent == f.Index).OrderBy(t => t.Index).Select(t => t.Index)] : [], f.Room, f.Retained);
+        f.Parent != 0
+            ? new(f.ItemId, 0, 0, 0, f.Dir, f.Parent, [], f.Room, f.Retained)
+            : new(f.ItemId, f.X, f.Y, f.Z, f.Dir, f.Parent,
+                [.. owner.Furniture.Where(t => t.Parent == f.Index).OrderBy(t => t.Index).Select(t => t.Index)], f.Room, f.Retained);
 
     /// <summary>Builds the camp record the client is sent for a pitched tent.</summary>
     /// <param name="ownerId">The tent owner's login id.</param>

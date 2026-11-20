@@ -208,7 +208,7 @@ public sealed class HomeShopHandlers(
         var total = (long)price * count;
         if (me.Gold < total || oc.Gold + total > int.MaxValue)
             return ValueTask.CompletedTask;
-        var trial = me.Bag.Select(b => new BagItem { Slot = b.Slot, ItemId = b.ItemId, Count = b.Count, Wear = b.Wear }).ToList();
+        var trial = Bag.Trial(me.Bag);
         if (Bag.Add(trial, items, offer.ItemId, count, offer.Wear).Sum(x => x.Added) != count)
         {
             session.Send(Refuse(5)); // code
@@ -222,22 +222,7 @@ public sealed class HomeShopHandlers(
         ownerSession.Send(ItemMessages.BagSlotDecrease(bag.Slot, count));
         if (bag.Count == 0)
             oc.Bag.Remove(bag);
-        foreach (var (stack, added) in Bag.Add(me, items, offer.ItemId, count, offer.Wear, offer.Insert, offer.Fusion, offer.Pose, offer.BoxItem))
-            session.Send(
-                ItemMessages.BagAdd(
-                    new BagEntry
-                    {
-                        Slot = stack.Slot,
-                        ItemId = stack.ItemId,
-                        Count = added,
-                        Wear = stack.Wear,
-                        Insert = stack.Insert,
-                        FusionLevel = stack.Fusion,
-                        PoseItemId = stack.Pose,
-                        BoxItemId = stack.BoxItem,
-                        UsedAmount = offer.Used,
-                        ExtraAmount = offer.Extra
-                    }));
+        Bag.SendAdded(session, Bag.Add(me, items, offer.ItemId, count, offer.Wear, offer.Insert, offer.Fusion, offer.Pose, offer.BoxItem, offer.Used, offer.Extra));
         var sold = new PacketWriter(Action62.Code, Action62.ShelfSold).I32(ownerId).U16(offer.Id).U8(count).U16(piece.Index).ToArray();
         offer.Count -= count;
         if (offer.Count == 0)

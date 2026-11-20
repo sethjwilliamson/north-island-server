@@ -154,13 +154,26 @@ public sealed class GpsHandlers(
         if (next == 0 || items[next] is null)
             return ValueTask.CompletedTask;
         var (wear, insert, fusion) = (gps.Wear, gps.Insert, gps.Fusion);
-        c.Bag.Remove(gps);
+        var slot = gps.Slot;
+        if (gps.Count > 1)
+        {
+            // only one GPS of the stack is upgraded: the new one needs a free slot of its own
+            var trial = Bag.Trial(c.Bag);
+            Bag.TakeAt(trial, gps.Slot, 1);
+            Bag.TakeAt(trial, crystal.Slot, 1);
+            slot = Bag.FreeSlot(trial, items, next);
+            if (slot == 0)
+                return ValueTask.CompletedTask;
+        }
+        gps.Count--;
+        if (gps.Count == 0)
+            c.Bag.Remove(gps);
         session.Send(ItemMessages.BagSlotDecrease(gps.Slot, 1));
         crystal.Count--;
         if (crystal.Count == 0)
             c.Bag.Remove(crystal);
         session.Send(ItemMessages.BagSlotDecrease(crystal.Slot, 1));
-        var made = new BagItem { Slot = gps.Slot, ItemId = next, Count = 1, Wear = wear, Insert = insert, Fusion = fusion };
+        var made = new BagItem { Slot = slot, ItemId = next, Count = 1, Wear = wear, Insert = insert, Fusion = fusion };
         c.Bag.Add(made);
         session.Send(ItemMessages.BagAdd(new BagEntry { Slot = made.Slot, ItemId = next, Count = 1, Wear = wear, Insert = insert, FusionLevel = fusion }));
         logger.LogInformation("[{Session}] {Name} upgrades the GPS to {Item}", session.Id, c.Name, items[next]?.Name.Trim());

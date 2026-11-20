@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Data\EquipmentClasses.tsv" />
+    <EmbeddedResource Include="Data\EquipmentClassesWloHub.tsv" />
     <EmbeddedResource Include="Data\MallBoxes.tsv" />
     <EmbeddedResource Include="Data\LuckyBags.tsv" />
     <EmbeddedResource Include="Data\BoxGuesses.tsv" />

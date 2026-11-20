@@ -1,19 +1,28 @@
 using Microsoft.Extensions.Logging;
 using NorthIsland.Protocol.IO;
+using NorthIsland.Protocol.Messages.Player;
 using NorthIsland.Protocol.Messages.World;
 using NorthIsland.Protocol.Opcodes;
 
 namespace NorthIsland.Server.Features.Social;
 
-/// <summary>Handles small player settings and actions: options, actions, nickname, profile, hotkeys, emotions.</summary>
+/// <summary>Handles small player settings and actions: options, actions (and the HP and SP recovery while sitting), nickname, profile, hotkeys, emotions.</summary>
 /// <param name="world">World state, for broadcasts.</param>
 /// <param name="options">Item options, with the Yes-No Board emotions.</param>
+/// <param name="socialOptions">Social options, with the sitting recovery.</param>
 /// <param name="logger">Logger.</param>
 public sealed class SocialHandlers(
     WorldState world,
     Microsoft.Extensions.Options.IOptions<ItemOptions> options,
+    Microsoft.Extensions.Options.IOptions<SocialOptions> socialOptions,
     ILogger<SocialHandlers> logger)
 {
+    /// <summary>The first frame of the sit-down action: group 46 (ActionMotionIds[13], the default Alt+1), one frame per direction.</summary>
+    public const byte SitFirstFrame = 46;
+
+    /// <summary>The last frame of the sit-down action (GetDirGroupBase maps 46..53 to 46).</summary>
+    public const byte SitLastFrame = 53;
+
     /// <summary>Stores the packet's byte as the character's first option.</summary>
     /// <param name="s">The player's session.</param>
     /// <param name="b">The packet body.</param>
@@ -39,17 +48,87 @@ public sealed class SocialHandlers(
     /// <param name="b">The packet body.</param>
     internal ValueTask OnChannelBits(GameSession s, ReadOnlyMemory<byte> b) => OnOption(s, b, c => c.ChannelBits = b.Span[0]);
 
-    /// <summary>Shows an action frame of the player to the others on the map.</summary>
+    /// <summary>Shows an action frame of the player to the others on the map; a sit-down frame starts the HP and SP recovery.</summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the frame byte.</param>
     internal ValueTask OnAction(GameSession session, ReadOnlyMemory<byte> body)
     {
-        if (InWorld(session) is null)
+        if (InWorld(session) is not { } character)
             return ValueTask.CompletedTask;
         var frame = new PacketReader(body.Span).U8();
         world.Broadcast(session, WorldServerMessages.PlayerAction(session.Account!.LoginId, frame), sameMapOnly: true);
+        SetSitting(session, character, frame is >= SitFirstFrame and <= SitLastFrame);
         return ValueTask.CompletedTask;
     }
+
+    /// <summary>Starts or ends the sitting recovery. Turning while seated (the client sends the sit frame again) keeps the step timer.</summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="c">The player's character.</param>
+    /// <param name="sitting">True when the player now sits.</param>
+    private void SetSitting(GameSession session, Character c, bool sitting)
+    {
+        var state = session.Sitting;
+        if (!sitting)
+        {
+            state.Active = false;
+            return;
+        }
+        if (state.Active && state.MapId == c.MapId && state.X == c.X && state.Y == c.Y)
+            return;
+        state.Active = true;
+        (state.MapId, state.X, state.Y) = (c.MapId, c.X, c.Y);
+        state.Next = GameClock.UtcNow.AddSeconds(Math.Max(1, socialOptions.Value.Sitting.TickSeconds));
+    }
+
+    /// <summary>
+    /// Does one sitting recovery step when it is due: gives the player, and the active pet, HP and SP back (S 8/1, 8/2). Pauses in battle (the
+    /// client keeps the sitting action through a battle); ends when the player is no longer where they sat down (a walk, a warp).
+    /// </summary>
+    /// <param name="session">The sitting player's session.</param>
+    /// <param name="c">The player's character.</param>
+    /// <param name="now">The current time.</param>
+    internal void SittingTick(GameSession session, Character c, DateTime now)
+    {
+        var state = session.Sitting;
+        var o = socialOptions.Value.Sitting;
+        if (!o.Enabled || state.MapId != c.MapId || state.X != c.X || state.Y != c.Y)
+        {
+            state.Active = false;
+            return;
+        }
+        if (session.Battle is not null || now < state.Next)
+            return;
+        state.Next = now.AddSeconds(Math.Max(1, o.TickSeconds));
+        if (Raised(c.Hp, c.MaxHp, o.HpPerTick) is { } hp)
+        {
+            c.Hp = hp;
+            session.Send(InnMessages.SetAttribute(Action8.AttrHp, hp));
+        }
+        if (Raised(c.Sp, c.MaxSp, o.SpPerTick) is { } sp)
+        {
+            c.Sp = sp;
+            session.Send(InnMessages.SetAttribute(Action8.AttrSp, sp));
+        }
+        if (!o.ActivePet || c.ActivePetId == 0 || c.Pets.Find(p => p.NpcId == c.ActivePetId) is not { } pet)
+            return;
+        if (Raised(pet.Hp, pet.MaxHp, o.HpPerTick) is { } petHp)
+        {
+            pet.Hp = petHp;
+            session.Send(PetMessages.SetAttribute(pet.Slot, Action8.AttrHp, petHp));
+        }
+        if (Raised(pet.Sp, pet.MaxSp, o.SpPerTick) is { } petSp)
+        {
+            pet.Sp = petSp;
+            session.Send(PetMessages.SetAttribute(pet.Slot, Action8.AttrSp, petSp));
+        }
+    }
+
+    /// <summary>A value raised by a step and capped at its maximum.</summary>
+    /// <param name="value">The current value.</param>
+    /// <param name="max">The maximum.</param>
+    /// <param name="step">The step.</param>
+    /// <returns>The new value, or null when nothing changes.</returns>
+    private static int? Raised(int value, int max, int step) => step > 0 && value < max ? Math.Min(max, value + step) : null;
 
     /// <summary>Stores the nickname (cut to 14 characters) and tells every player.</summary>
     /// <param name="session">The player's session.</param>
@@ -183,6 +262,7 @@ public sealed class SocialHandlers(
     {
         if (InWorld(session) is null)
             return ValueTask.CompletedTask;
+        session.Sitting.Active = false;
         world.Broadcast(session, WorldServerMessages.PlayerAction(session.Account!.LoginId, 0), sameMapOnly: true);
         return ValueTask.CompletedTask;
     }

@@ -15,6 +15,12 @@ public sealed class BattleOptions
     /// <summary>How close in pixels a field monster's place or wander box must be to the player to be fought.</summary>
     public int FieldEncounterRadius { get; set; } = 500;
 
+    /// <summary>True when a field fight rolled inside an encounter zone of the map (a mine, 地雷塊) is taken from the zone's battle list; false fights only the field monsters around.</summary>
+    public bool FieldEncounterZones { get; set; } = true;
+
+    /// <summary>The chance in percent that a field fight in an encounter zone comes from the zone rather than from field monsters that are near too; the other is tried when the first starts no battle.</summary>
+    public int FieldEncounterZonePercent { get; set; } = 50;
+
     /// <summary>A fixed pause in milliseconds between the actions of a round; 0 uses the animation lengths of the skills instead.</summary>
     public int BattleActionDelayMs { get; set; }
 
@@ -75,16 +81,49 @@ public sealed class BattleOptions
     /// <summary>How many seconds after a battle a player cannot be drawn into a new fight.</summary>
     public int BattleImmunitySeconds { get; set; } = 5;
 
-    /// <summary>The base term of the experience a monster pays.</summary>
+    /// <summary>Which formula decides the experience a monster pays: the classic monster-level terms or a share of the fighter's level.</summary>
+    public ExpMode ExpMode { get; set; } = ExpMode.Classic;
+
+    /// <summary>The base term of the kills a first-run fighter (no rebirth) needs per level in level-share mode.</summary>
+    public double KillsPerLevelBase { get; set; } = 5;
+
+    /// <summary>The factor on the fighter's level raised to <see cref="KillsPerLevelPower"/> in the kills per level of a first-run fighter.</summary>
+    public double KillsPerLevelCoef { get; set; } = 0.5;
+
+    /// <summary>The power the fighter's level is raised to in the kills per level of a first-run fighter.</summary>
+    public double KillsPerLevelPower { get; set; } = 2;
+
+    /// <summary>The base term of the kills a reborn fighter needs per level in level-share mode.</summary>
+    public double RebornKillsPerLevelBase { get; set; } = 5;
+
+    /// <summary>The factor on the fighter's level raised to <see cref="RebornKillsPerLevelPower"/> in the kills per level of a reborn fighter.</summary>
+    public double RebornKillsPerLevelCoef { get; set; } = 1.13;
+
+    /// <summary>The power the fighter's level is raised to in the kills per level of a reborn fighter.</summary>
+    public double RebornKillsPerLevelPower { get; set; } = 2;
+
+    /// <summary>The percent more experience per level a monster is above the fighter, in level-share mode; 0 or more.</summary>
+    public double FightUpBonusPerLevelPercent { get; set; } = 1.5;
+
+    /// <summary>The largest percent more experience a monster above the fighter pays, in level-share mode; 0 or more.</summary>
+    public double FightUpBonusMaxPercent { get; set; } = 50;
+
+    /// <summary>
+    /// The highest fighter level used when a fighter above a monster is compared with it for experience, in both modes; a monster
+    /// above the fighter's real level is still measured from that level. 0 or less turns it off.
+    /// </summary>
+    public int LevelGapCeiling { get; set; } = 165;
+
+    /// <summary>The base term of the experience a monster pays (classic mode).</summary>
     public double MonsterExpBase { get; set; } = 1.5;
 
-    /// <summary>The experience term a monster pays per monster level.</summary>
+    /// <summary>The experience term a monster pays per monster level (classic mode).</summary>
     public double MonsterExpPerLevel { get; set; } = 0.5;
 
-    /// <summary>The experience term added per level the monster is above the fighter.</summary>
+    /// <summary>The experience term added per level the monster is above the fighter (classic mode).</summary>
     public double ExpPerLevelUnderMonster { get; set; } = 1.2;
 
-    /// <summary>The experience term subtracted per level the monster is below the fighter.</summary>
+    /// <summary>The experience term subtracted per level the monster is below the fighter (classic mode).</summary>
     public double ExpPerLevelOverMonster { get; set; } = 0.6;
 
     /// <summary>The share of a monster's experience a fighter earns for felling it alone.</summary>
@@ -131,6 +170,9 @@ public sealed class BattleOptions
 
     /// <summary>The chance in percent that a Fervidity hit puts mess on a target it left standing.</summary>
     public double FervidityMessPercent { get; set; } = 14;
+
+    /// <summary>Which control and debuff statuses can be on an enemy at the same time: one of each kind, or one in all.</summary>
+    public DebuffStacking DebuffStacking { get; set; }
 
     /// <summary>The percent more damage a target under Cuss takes.</summary>
     public double CussDamagePercent { get; set; } = 50;
@@ -201,6 +243,15 @@ public sealed class BattleOptions
     /// <summary>The chance in percent that a defeated monster drops one item of its item list.</summary>
     public int MonsterDropChancePercent { get; set; } = 30;
 
+    /// <summary>Items any monster within a level range may drop on top of its own list, such as the Alchemy Books; empty turns them off.</summary>
+    public List<LevelDrop> LevelDrops { get; set; } = [];
+
     /// <summary>True when winning a battle also pays gold.</summary>
     public bool MonsterGoldRewards { get; set; }
+
+    /// <summary>The lowest gold a monster pays per level; a level 100 monster at 0.1 pays at least 10.</summary>
+    public double GoldPerLevelMin { get; set; } = 0.1;
+
+    /// <summary>The highest gold a monster pays per level; a level 100 monster at 1 pays at most 100.</summary>
+    public double GoldPerLevelMax { get; set; } = 1.0;
 }

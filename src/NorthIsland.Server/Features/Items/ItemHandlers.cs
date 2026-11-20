@@ -308,8 +308,9 @@ public sealed class ItemHandlers(
     }
 
     /// <summary>
-    /// Handles moving an item between bag slots: pours a potion into a bottle, moves or splits a stack into an empty slot, merges stacks of the same
-    /// item, or swaps two slots.
+    /// Handles moving an item between bag slots: pours a potion into a bottle, moves or splits a stack into an empty slot, tops up a stack of the
+    /// same stackable item with what fits, or swaps a whole stack with a different item of the same size. The ridden vehicle and the puppet's
+    /// item stay where they are. The answer, 23/10, carries the count that moved; the client swaps when the target holds a different item.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the source slot, the target slot and the count (0 for the whole stack).</param>
@@ -329,6 +330,11 @@ public sealed class ItemHandlers(
         var target = character.Bag.Find(b => b.Slot == move.To);
         if (target is not null && bottles.TryFill(session, character, source, target))
             return ValueTask.CompletedTask;
+        if (Pinned(session, character, move.From) || Pinned(session, character, move.To))
+        {
+            logger.LogWarning("[{Session}] bag move {From} -> {To}: the ridden vehicle or the puppet's item stays put", session.Id, move.From, move.To);
+            return ValueTask.CompletedTask;
+        }
         if (target is null && !Bag.Fits(character, items, source.ItemId, move.To, ignore: count == source.Count ? source : null))
         {
             logger.LogWarning("[{Session}] bag move {From} -> {To}: item {Item} does not fit there", session.Id, move.From, move.To, source.ItemId);
@@ -348,25 +354,45 @@ public sealed class ItemHandlers(
                         ItemId = source.ItemId,
                         Count = count,
                         Wear = source.Wear,
+                        Insert = source.Insert,
                         Fusion = source.Fusion,
                         Pose = source.Pose,
-                        BoxItem = source.BoxItem
+                        BoxItem = source.BoxItem,
+                        Used = source.Used,
+                        Extra = source.Extra
                     });
             }
         }
-        else if (target.ItemId == source.ItemId && target.Count + count <= Bag.MaxStack)
+        else if (target.ItemId == source.ItemId && Bag.IsStackable(items[source.ItemId]))
         {
+            count = (byte)Math.Min(count, Bag.MaxStack - target.Count);
+            if (count == 0)
+                return ValueTask.CompletedTask;
             target.Count += count;
             TakeFromBag(character, source, count);
         }
-        else
+        else if (target.ItemId != source.ItemId && count == source.Count && Bag.SameSize(items, source.ItemId, target.ItemId))
         {
             (source.Slot, target.Slot) = (target.Slot, source.Slot);
+        }
+        else
+        {
+            logger.LogWarning("[{Session}] bag move {From} -> {To} x{Count}: {Item} cannot go onto {Other}", session.Id, move.From, move.To, count,
+                source.ItemId, target.ItemId);
+            return ValueTask.CompletedTask;
         }
 
         session.Send(ItemMessages.BagMove(move.From, count, move.To));
         return ValueTask.CompletedTask;
     }
+
+    /// <summary>Whether a bag slot holds something that must not move: the vehicle being ridden or the item lent to a puppet helper.</summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="character">The player's character.</param>
+    /// <param name="slot">The bag slot.</param>
+    /// <returns>True when the slot is pinned.</returns>
+    private static bool Pinned(GameSession session, Character character, byte slot) =>
+        session.Vehicle?.BagSlot == slot || (character.PuppetBagSlot != 0 && character.PuppetBagSlot == slot);
 
     /// <summary>Handles picking up a thing from the ground: gold goes to the purse, an item to the bag when all of it fits.</summary>
     /// <param name="session">The player's session.</param>
@@ -410,8 +436,7 @@ public sealed class ItemHandlers(
             logger.LogInformation("[{Session}] {Name} picks up {Gold} gold ({Total} now)", session.Id, character.Name, thing.Gold, character.Gold);
             return ValueTask.CompletedTask;
         }
-        Bag.Add(character, items, thing.ItemId, thing.Count, thing.Wear);
-        session.Send(GroundMessages.ItemObtained(thing.ItemId, (ushort)thing.Count, thing.Wear));
+        Bag.SendObtained(session, items, thing.ItemId, Bag.Add(character, items, thing.ItemId, thing.Count, thing.Wear));
         logger.LogInformation("[{Session}] {Name} picks up {Item} ({ItemName}) x{Count} from ground index {Index}", session.Id, character.Name,
             thing.ItemId, items[thing.ItemId]?.Name, thing.Count, index);
         return ValueTask.CompletedTask;
@@ -597,8 +622,7 @@ public sealed class ItemHandlers(
         }
         TakeFromBag(character, stack, 1);
         session.Send(ItemMessages.BagSlotDecrease(stack.Slot, 1));
-        var added = Bag.Add(character, items, content, 1).Sum(c => c.Added);
-        session.Send(GroundMessages.ItemObtained(content, (ushort)added));
+        Bag.SendObtained(session, items, content, Bag.Add(character, items, content, 1));
         logger.LogInformation("[{Session}] {Name} opens {Box} and gets {Item}", session.Id, character.Name, box.Name, items[content]?.Name);
     }
 

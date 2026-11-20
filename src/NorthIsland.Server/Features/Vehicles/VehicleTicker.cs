@@ -24,7 +24,13 @@ public sealed class VehicleTicker(
             while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
                 foreach (var session in world.OnlineSessions().Where(s => s.Vehicle is { Riding: true }).ToList())
                 {
-                    try { care.Tick(session, seconds); }
+                    try
+                    {
+                        if (!session.TryExclusive(out var held)) // a packet is being handled: drain on the next tick
+                            continue;
+                        using (held)
+                            care.Tick(session, seconds);
+                    }
                     catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogError(ex, "vehicle tick failed"); }
                 }
         }

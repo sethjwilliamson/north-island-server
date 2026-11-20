@@ -350,7 +350,8 @@ public sealed partial class EventEngine(
                     }
                     if (target == EventArenas.LobbyMapId && EventArenas.IsArena(run.MapId) && session.ActiveCharacter is { } leaver)
                         marks.SendRemoved(session, EventArenas.ClearRun(leaver, EventArenas.ProgressMarks(run.MapId)));
-                    // the Carnie exit takes the player back to where they came to Carnie from, when that place was kept
+                    // a Carnie exit (Carnie's own door or the entrance hall's) takes the player back to where they came to Carnie from,
+                    // when that place was kept
                     var carnieBack = session.ActiveCharacter is { } visitor ? CarnieReturn.Exit(visitor, run.MapId, target) : null;
                     world.ChangeMap(session, carnieBack is not null && maps.InstanceOfMap(carnieBack.MapId) is null ? carnieBack
                         : new DoorWarp(target, (ushort)Math.Clamp(convey.X, 0, ushort.MaxValue), (ushort)Math.Clamp(convey.Y, 0, ushort.MaxValue),
@@ -476,11 +477,11 @@ public sealed partial class EventEngine(
                     run.BattleOutcome = null;
                     return;
 
-                case ResultAction.PlayerAction: // the player plays an action, shown to the others on the map
+                case ResultAction.PlayerEmotion: // the player shows an emotion (32/1, emotion id 100 + n), shown to the others on the map
                 {
-                    var action = Protocol.Messages.World.WorldServerMessages.PlayerAction(session.Account!.LoginId, (byte)mapped.Service);
-                    session.Send(action);
-                    world.Broadcast(session, action, sameMapOnly: true);
+                    var emotion = Protocol.Messages.World.WorldServerMessages.PlayerEmotion(session.Account!.LoginId, (byte)(100 + mapped.Service));
+                    session.Send(emotion);
+                    world.Broadcast(session, emotion, sameMapOnly: true);
                     logger.LogInformation("[{Session}] {Source}: {What}", session.Id, run.Source, mapped.Description);
                     break;
                 }

@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using Microsoft.Extensions.Logging;
+using NorthIsland.Protocol.Messages.Events;
 using NorthIsland.Protocol.Opcodes;
 
 namespace NorthIsland.Server.Features.Events;
@@ -56,6 +57,15 @@ public sealed class EventHandlers(
                 break;
             default: // any other sub code: starts the event of that sub code
                 var index = span.Length >= 3 ? BinaryPrimitives.ReadUInt16LittleEndian(span[1..3]) : 0;
+                if (NorthIsland.Server.World.WorldState.IsLoadingMap(session))
+                {
+                    // sent on the map the player was just warped off (a team member following its leader through a door): its index
+                    // names a door or NPC of that map, not of this one; the client still waits for the event's end
+                    logger.LogInformation("[{Session}] trigger {Trigger} index {Index} sent before map {Map} loaded, dropped",
+                        session.Id, sub, index, session.ActiveCharacter.MapId);
+                    session.Send(EventMessages.Finished());
+                    break;
+                }
                 engine.Start(session, sub, index);
                 break;
         }

@@ -272,7 +272,8 @@ public sealed class QuizHandlers(
                 var p = finalists[place - 1];
                 p.Session.Send(QuizMessages.Over());
                 p.Session.Send(QuizMessages.Results(names));
-                GivePrize(p.Session, place);
+                using (await p.Session.ExclusiveAsync().ConfigureAwait(false)) // the prize goes in the bag between packets
+                    GivePrize(p.Session, place);
             }
             logger.LogInformation("Q&A over: {Places}", string.Join(", ", finalists.Select(p => $"{p.Session.ActiveCharacter?.Name} {p.Score}")));
         }

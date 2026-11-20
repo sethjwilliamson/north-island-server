@@ -31,6 +31,20 @@ public sealed class TrainingIslandHandlers(
     /// <returns>True for the island and every area reached through its doors.</returns>
     public static bool IsIslandMap(int mapId) => mapId is >= FirstIslandMap and <= LastIslandMap;
 
+    /// <summary>Whether a character's training state (from a Training Voucher, Ticket or Fare) is running.</summary>
+    /// <param name="c">The character.</param>
+    /// <returns>True while the training time has not run out.</returns>
+    public static bool IsTraining(Character c) => TimedEffects.Find(c, Kind, TimedEffects.Now) is not null;
+
+    /// <summary>
+    /// Whether a character is on the Training Island or one of its areas without a running training state. Anyone can walk in, but
+    /// only a player in training gets anything for fighting there: IGG's v4.0 preview of the Training Area says only the player who
+    /// uses the Training Voucher gets EXP.
+    /// </summary>
+    /// <param name="c">The character.</param>
+    /// <returns>True when the island's rewards and heal are withheld.</returns>
+    public static bool IsUntrainedOnIsland(Character c) => IsIslandMap(c.MapId) && !IsTraining(c);
+
     /// <summary>Coordinates on the Training Island where players arrive.</summary>
     public const int IslandX = 2632, IslandY = 1344;
 

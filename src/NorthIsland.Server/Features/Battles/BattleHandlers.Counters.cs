@@ -33,7 +33,7 @@ public sealed partial class BattleHandlers
         if (defender.IsHuman)
             (damage, critical, missed) = HitTarget(defender, attacker, null, combo: false);
         else
-            (damage, critical) = MonsterBlow(defender, attacker, null, combo: false);
+            (damage, critical, missed) = MonsterBlow(defender, attacker, null, combo: false);
         battle.SendAttackArea(defender);
         battle.Send(client => BattleMessages.Action(defender.Row, defender.Col, counterId,
             [new ActionTarget(attacker.Row, attacker.Col, Hit: !missed, Guard: 0, BlowValues(damage, critical, missed, null))], client));

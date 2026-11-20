@@ -175,14 +175,21 @@ public sealed class Fighter
     /// <summary>True once the event drop has been rolled.</summary>
     public bool EventDropRolled { get; set; }
 
+    /// <summary>The level drop table item this monster drops, rolled once; null when none.</summary>
+    public ushort? LevelDropItem { get; set; }
+
+    /// <summary>True once the level drop has been rolled.</summary>
+    public bool LevelDropRolled { get; set; }
+
     /// <summary>True once the drop was handed to a player.</summary>
     public bool DropGiven { get; set; }
 
     /// <summary>The total damage done to this monster by combinations of two or more attackers.</summary>
     public long ComboDamage { get; set; }
 
-    /// <summary>The distinct debuff effect bytes this fighter cast on enemies, hit or missed, for the damage burst.</summary>
-    public HashSet<byte> DebuffsCast { get; } = [];
+    /// <summary>The distinct debuff effect bytes this fighter cast on each enemy, hit or missed, for the damage burst.</summary>
+    /// <remarks>Kept per enemy: a monster that enters a fallen one's cell is a new fighter and starts with none.</remarks>
+    public Dictionary<Fighter, HashSet<byte>> DebuffsCast { get; } = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>The buff effect bytes this fighter put on allies and who got them, for the damage burst.</summary>
     public HashSet<(byte Effect, Fighter Target)> BuffsGiven { get; } = [];
@@ -190,9 +197,15 @@ public sealed class Fighter
     /// <summary>True once this fighter has done damage to an enemy in this battle.</summary>
     public bool DealtDamage { get; set; }
 
-    /// <summary>Counts the distinct debuffs this fighter cast plus the distinct buffs it put on allies who then did damage.</summary>
-    public int BurstEffectCount =>
-        DebuffsCast.Count + BuffsGiven.Where(b => b.Target.DealtDamage).Select(b => b.Effect).Distinct().Count();
+    /// <summary>
+    /// Counts the distinct debuffs this fighter cast on an enemy plus the distinct buffs it put on allies who then did damage in the
+    /// battle: debuffs count for each enemy, buffs once a battle.
+    /// </summary>
+    /// <param name="enemy">The enemy whose combination damage the count applies to.</param>
+    /// <returns>The number of effects.</returns>
+    public int BurstEffectCountOn(Fighter enemy) =>
+        (DebuffsCast.TryGetValue(enemy, out var debuffs) ? debuffs.Count : 0)
+        + BuffsGiven.Where(b => b.Target.DealtDamage).Select(b => b.Effect).Distinct().Count();
 
     /// <summary>True when the player cast a buff on their own pet during this battle.</summary>
     public bool BuffedPet { get; set; }

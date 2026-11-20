@@ -97,7 +97,8 @@ public sealed class StallHandlers(
         List<(byte Slot, byte Count, ushort ItemId)> wanted = [];
         for (var at = 4; at + 8 <= body.Length; at += 8)
             wanted.Add((body.Span[at], body.Span[at + 1], BinaryPrimitives.ReadUInt16LittleEndian(body.Span[(at + 2)..]))); // 1 Count, 2 ItemId
-        if (wanted.Count == 0 || world.SessionOf(ownerId) is not { } owner || ReferenceEquals(owner, session)
+        if (wanted.Count == 0 || wanted.Select(w => w.Slot).Distinct().Count() != wanted.Count // each stall slot at most once: two lines of one stack would sell it twice
+            || world.SessionOf(ownerId) is not { } owner || ReferenceEquals(owner, session)
             || owner.Stalls.Items is not { } stall || owner.ActiveCharacter is not { } seller)
             return ValueTask.CompletedTask;
 
@@ -128,8 +129,8 @@ public sealed class StallHandlers(
 
             foreach (var (stack, count, price) in lines)
             {
-                var (slot, itemId, wear, insert, fusion, pose, boxItem) =
-                    (stack.Slot, stack.ItemId, stack.Wear, stack.Insert, stack.Fusion, stack.Pose, stack.BoxItem);
+                var (slot, itemId, wear, insert, fusion, pose, boxItem, used, extra) =
+                    (stack.Slot, stack.ItemId, stack.Wear, stack.Insert, stack.Fusion, stack.Pose, stack.BoxItem, stack.Used, stack.Extra);
                 stack.Count -= count;
                 if (stack.Count == 0)
                 {
@@ -138,8 +139,7 @@ public sealed class StallHandlers(
                 }
                 owner.Send(ItemMessages.BagSlotDecrease(slot, count));
                 owner.Send(StallMessages.Sold(itemId, count, price * count, slot));
-                Bag.Add(buyer, items, itemId, count, wear, insert, fusion, pose, boxItem);
-                session.Send(GroundMessages.ItemObtained(itemId, count));
+                Bag.SendAdded(session, Bag.Add(buyer, items, itemId, count, wear, insert, fusion, pose, boxItem, used, extra));
                 logger.LogInformation("[{Session}] {Buyer} buys {Item} x{Count} from {Seller}'s stall for {Gold}", session.Id, buyer.Name,
                     items[itemId]?.Name, count, seller.Name, price * count);
             }

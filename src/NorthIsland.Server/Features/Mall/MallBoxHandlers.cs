@@ -60,21 +60,8 @@ public sealed class MallBoxHandlers(
             logger.LogInformation("[{Session}] {Name}: bag slot {Slot} is not a gift box with known contents", session.Id, c.Name, body.Span[0]);
             return ValueTask.CompletedTask;
         }
-        var trial = c.Bag.Select(
-            b =>
-                new BagItem
-                {
-                    Slot = b.Slot,
-                    ItemId = b.ItemId,
-                    Count = b.Count,
-                    Wear = b.Wear,
-                    Insert = b.Insert,
-                    Fusion = b.Fusion,
-                    Pose = b.Pose,
-                    BoxItem = b.BoxItem
-                })
-            .ToList();
-        Bag.Remove(trial, stack.ItemId, 1);
+        var trial = Bag.Trial(c.Bag);
+        Bag.TakeAt(trial, stack.Slot, 1);
         if (box.Items.Any(i => items[i.Item] is null || Bag.Add(trial, items, i.Item, i.Count).Sum(x => x.Added) != i.Count)
             || (long)c.Gold + box.Gold > int.MaxValue)
         {
@@ -131,21 +118,10 @@ public sealed class MallBoxHandlers(
                 return ValueTask.CompletedTask;
             }
         }
-        var trial = c.Bag.Select(
-            b =>
-                new BagItem
-                {
-                    Slot = b.Slot,
-                    ItemId = b.ItemId,
-                    Count = b.Count,
-                    Wear = b.Wear,
-                    Insert = b.Insert,
-                    Fusion = b.Fusion,
-                    Pose = b.Pose,
-                    BoxItem = b.BoxItem
-                })
-            .ToList();
-        Bag.Remove(trial, stack.ItemId, 1);
+        var trial = Bag.Trial(c.Bag);
+        Bag.TakeAt(trial, stack.Slot, 1);
+        if (key is not null)
+            Bag.TakeAt(trial, key.Slot, 1);
         if (Bag.Add(trial, items, reward.ItemId, reward.Count).Sum(x => x.Added) != reward.Count)
         {
             logger.LogInformation(
@@ -170,8 +146,7 @@ public sealed class MallBoxHandlers(
                 c.Bag.Remove(key);
             session.Send(ItemMessages.BagSlotDecrease(key.Slot, 1));
         }
-        var added = Bag.Add(c, items, reward.ItemId, reward.Count).Sum(x => x.Added);
-        session.Send(GroundMessages.ItemObtained(reward.ItemId, (ushort)added));
+        var added = Bag.SendObtained(session, items, reward.ItemId, Bag.Add(c, items, reward.ItemId, reward.Count));
         logger.LogInformation("[{Session}] {Name} opens {Box}: {Item} x{Count}", session.Id, c.Name, boxName, items[reward.ItemId]!.Name.Trim(), added);
         return ValueTask.CompletedTask;
     }

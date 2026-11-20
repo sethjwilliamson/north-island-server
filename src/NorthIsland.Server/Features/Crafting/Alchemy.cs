@@ -51,13 +51,29 @@ public static class Alchemy
     public static ushort Class(ItemRecord item, int i) =>
         item.Words142.Length > i && item.Words142[i] != EquipmentClass ? item.Words142[i] : (ushort)0;
 
+    /// <summary>
+    /// Item flag bit of the items an ordinary compound does not make, such as the instance dungeon rewards (Sea Wing Helmet and others). Such items
+    /// still go into a compound as materials, and a bless compound still makes the team NPCs' gear, which carries it too. Of the items players have
+    /// recorded, about 95% of those without the bit have come out of a compound and about 4% of those with it.
+    /// </summary>
+    public const ushort NotMadeFlag = 8;
+
+    /// <summary>
+    /// Item ids that carry <see cref="NotMadeFlag"/> but are recorded coming out of compounds often enough to keep: 61071 White Crystal and
+    /// 32102 Carrot.
+    /// </summary>
+    public static readonly IReadOnlySet<ushort> MadeDespiteFlag = new HashSet<ushort> { 61071, 32102 };
+
     /// <summary>Tells whether an item can come out of a compound.</summary>
     /// <param name="item">The item record to test.</param>
+    /// <param name="bless">True for a bless compound, which ignores <see cref="NotMadeFlag"/>.</param>
     /// <returns>
-    /// True when the item has a shop rank, a first class, a second class other than 67, is not a book and has a printable name.
+    /// True when the item has a shop rank, a first class, a second class other than 67, is not a book, has a printable name and, outside a bless
+    /// compound, does not carry <see cref="NotMadeFlag"/> (unless it is one of <see cref="MadeDespiteFlag"/>).
     /// </returns>
-    public static bool CanBeMade(ItemRecord item) =>
+    public static bool CanBeMade(ItemRecord item, bool bless = false) =>
         item.ShopColumn >= 1 && Class(item, 0) != 0 && Class(item, 1) != 67 && !IsBook(item)
+            && (bless || (item.Flags & NotMadeFlag) == 0 || MadeDespiteFlag.Contains(item.Id))
             && item.Name.Trim().Length > 0 && item.Name.All(ch => ch is >= ' ' and <= '~');
 
     /// <summary>Works out how many ranks above the lowest material a compound reaches.</summary>
@@ -69,8 +85,13 @@ public static class Alchemy
         roll < 1 ? level + 3 : roll < 70 - Math.Max(0, skillLevel - 1) ? level + 1 : level + 2;
 
     /// <summary>
-    /// Rolls the result of compounding: the highest rank in reach that the materials' classes allow, or a failure when no item qualifies.
+    /// Rolls the result of compounding: the highest rank in reach that has an item matching the materials' bases, or a failure when no rank has one.
     /// </summary>
+    /// <remarks>
+    /// Each material adds only its first class, and the classes form an ordered list (<see cref="BaseOrder"/>). At a rank, the items whose full class
+    /// list equals that list are the candidates; when there are none, the items whose only class is the first of the list are. A bless compound takes
+    /// any item whose first class (and second class, if any) is among the materials' classes.
+    /// </remarks>
     /// <param name="materials">The item records of the materials, books left out.</param>
     /// <param name="level">The compound level: skill level plus the rank of the book used.</param>
     /// <param name="all">Every item of the game data, searched for the product.</param>
@@ -94,18 +115,40 @@ public static class Alchemy
         var baseRank = materials.Min(m => m.ShopColumn);
         var target = baseRank + Jump(level, roll(100), skillLevel);
         var lowest = form is AlchemyForm.Junior or AlchemyForm.Superior ? Math.Max(1, baseRank - MaxRanksBelow) : baseRank + 1;
-        var inRange = all.Where(i => CanBeMade(i) && i.ShopColumn >= lowest && i.ShopColumn <= target
-            && (Class(i, 1) == 0 || classes.Contains(Class(i, 1)))).ToList();
+        var inRange = all.Where(i => CanBeMade(i, form == AlchemyForm.Bless) && i.ShopColumn >= lowest && i.ShopColumn <= target).ToList();
         var main = MainClass(materials, form, counts);
-        var pool = form == AlchemyForm.Bless ? inRange.Where(i => classes.Contains(Class(i, 0))).ToList() : inRange.Where(i => Class(i, 0) == main).ToList();
-        if (form == AlchemyForm.Superior && pool.Exists(i => Class(i, 1) != 0))
-            pool = pool.FindAll(i => Class(i, 1) != 0);
-        var top = pool.GroupBy(i => i.ShopColumn).MaxBy(g => g.Key)?.OrderBy(i => i.Id).ToList();
+        var order = BaseOrder(materials, form, counts);
+        var pool = form == AlchemyForm.Bless
+            ? inRange.Where(i => classes.Contains(Class(i, 0)) && (Class(i, 1) == 0 || classes.Contains(Class(i, 1)))).ToList()
+            : inRange.Where(i => Bases(i).SequenceEqual(order) || Bases(i).SequenceEqual([main])).ToList();
+        var top = pool.GroupBy(i => i.ShopColumn).MaxBy(g => g.Key)?.ToList();
+        if (top is not null && form != AlchemyForm.Bless && top.Exists(i => Bases(i).SequenceEqual(order)))
+            top = top.FindAll(i => Bases(i).SequenceEqual(order)); // an exact match at the rank wins over items of the main class alone
+        top = top?.OrderBy(i => i.Id).ToList();
         if (top is { Count: > 0 })
             return new AlchemyResult(AlchemyOutcome.Made, top[roll(top.Count)], target, main);
         var kept = form == AlchemyForm.Superior && book ? 90 : 80;
         var fail = roll(100);
         return new AlchemyResult(fail < kept ? AlchemyOutcome.NothingLost : fail < kept + (100 - kept) / 2 ? AlchemyOutcome.Degraded : AlchemyOutcome.Stone, null, target, main);
+    }
+
+    /// <summary>Lists the classes of an item in order, up to five, leaving out empty places and the equipment placeholder.</summary>
+    /// <param name="item">The item record.</param>
+    /// <returns>The class numbers.</returns>
+    public static IEnumerable<ushort> Bases(ItemRecord item) => Enumerable.Range(0, 5).Select(i => Class(item, i)).Where(c => c != 0);
+
+    /// <summary>
+    /// Builds the ordered class list a compound must match: the first class of each material, each class once, in slot order, with the class the
+    /// compound follows (<see cref="MainClass"/>) moved to the front.
+    /// </summary>
+    /// <param name="materials">The item records of the materials, books left out.</param>
+    /// <param name="form">The rules of the alchemy skill used.</param>
+    /// <param name="counts">How many of each material are used, in the order of <paramref name="materials"/>; null counts one of each.</param>
+    /// <returns>The class numbers, the main class first.</returns>
+    public static IReadOnlyList<ushort> BaseOrder(IReadOnlyList<ItemRecord> materials, AlchemyForm form, IReadOnlyList<int>? counts = null)
+    {
+        var main = MainClass(materials, form, counts);
+        return [main, .. materials.Select(m => Class(m, 0)).Where(c => c != 0 && c != main).Distinct()];
     }
 
     /// <summary>

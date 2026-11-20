@@ -1,4 +1,5 @@
 using NorthIsland.GameData.Items;
+using NorthIsland.Protocol.Messages.Items;
 
 namespace NorthIsland.Server.World;
 
@@ -28,7 +29,15 @@ public static class Bag
     /// <returns>True when the item stacks; false for an unknown item.</returns>
     public static bool IsStackable(ItemRecord? r) =>
         r is not null && !r.IsEquipment && r.EquipSlot is not (9 or 10) && r.Type != VehicleType && r.CellWidth <= 1 && r.CellHeight <= 1
-            && r.UsePeriod == 0 && r.SubType != 130 && Bottles.KindOf(r) == 0 && !SingleItems.Contains(r.Id);
+            && !IsTimed(r) && r.SubType != 130 && Bottles.KindOf(r) == 0 && !SingleItems.Contains(r.Id);
+
+    /// <summary>
+    /// Whether an item wears out with time (the client's GetItemUsePeriod): a use period on an equip slot 1 to 7 or 10 item. The use period of
+    /// other items, such as the slot 8 exp potions, riceballs and space agreements, is the length of their effect, and they stack.
+    /// </summary>
+    /// <param name="r">The item's Item.dat record.</param>
+    /// <returns>True when the item has its own time limit.</returns>
+    private static bool IsTimed(ItemRecord r) => r.UsePeriod > 0 && r.EquipSlot is (>= 1 and <= 7) or 10;
 
     /// <summary>The item flag of items that cannot be transferred to another player.</summary>
     public const byte NoTradeFlag = 2;
@@ -108,6 +117,8 @@ public static class Bag
     /// <param name="fusion">The fusion level of new stacks.</param>
     /// <param name="pose">The item id of the pose look of new stacks, 0 for none.</param>
     /// <param name="boxItem">The item id of the box the item came in, 0 for none.</param>
+    /// <param name="used">The used amount of new stacks.</param>
+    /// <param name="extra">The extra amount of new stacks.</param>
     /// <returns>One entry per stack touched, with the number added to it; the numbers add up to less than count when the bag is full.</returns>
     public static List<(BagItem Item, byte Added)> Add(
         List<BagItem> bag,
@@ -118,7 +129,9 @@ public static class Bag
         ushort insert = 0,
         byte fusion = 0,
         ushort pose = 0,
-        ushort boxItem = 0)
+        ushort boxItem = 0,
+        int used = 0,
+        ushort extra = 0)
     {
         var changes = new List<(BagItem, byte)>();
         var stackable = IsStackable(items[itemId]);
@@ -132,7 +145,11 @@ public static class Bag
                 var slot = FreeSlot(bag, items, itemId);
                 if (slot == 0)
                     break;
-                stack = new BagItem { Slot = slot, ItemId = itemId, Count = 0, Wear = wear, Insert = insert, Fusion = fusion, Pose = pose, BoxItem = boxItem };
+                stack = new BagItem
+                {
+                    Slot = slot, ItemId = itemId, Count = 0, Wear = wear, Insert = insert, Fusion = fusion, Pose = pose, BoxItem = boxItem, Used = used,
+                    Extra = extra
+                };
                 bag.Add(stack);
             }
             var added = (byte)Math.Min(count, stackable ? MaxStack - stack.Count : 1);
@@ -171,6 +188,13 @@ public static class Bag
     /// <returns>The cell numbers.</returns>
     public static List<int> CellsOfStack(ItemData items, BagItem stack, int rows = Rows) =>
         CellsOf(stack.Slot, Size(items, stack.ItemId), rows) ?? [stack.Slot];
+
+    /// <summary>Whether two items cover the same number of cells across and down, so that they can swap places.</summary>
+    /// <param name="items">Item.dat, for the item sizes.</param>
+    /// <param name="a">One item id.</param>
+    /// <param name="b">The other item id.</param>
+    /// <returns>True when the sizes are equal.</returns>
+    public static bool SameSize(ItemData items, ushort a, ushort b) => Size(items, a) == Size(items, b);
 
     /// <summary>The width and height of an item in cells; 1 by 1 for an unknown item or one without a size.</summary>
     /// <param name="items">Item.dat, for the item sizes.</param>
@@ -258,6 +282,8 @@ public static class Bag
     /// <param name="fusion">The fusion level of new stacks.</param>
     /// <param name="pose">The item id of the pose look of new stacks, 0 for none.</param>
     /// <param name="boxItem">The item id of the box the item came in, 0 for none.</param>
+    /// <param name="used">The used amount of new stacks.</param>
+    /// <param name="extra">The extra amount of new stacks.</param>
     /// <returns>One entry per stack touched, with the number added to it; the numbers add up to less than count when the bag is full.</returns>
     public static List<(BagItem Item, byte Added)> Add(
         Character character,
@@ -268,8 +294,10 @@ public static class Bag
         ushort insert = 0,
         byte fusion = 0,
         ushort pose = 0,
-        ushort boxItem = 0) =>
-            Add(character.Bag, items, itemId, count, wear, insert, fusion, pose, boxItem);
+        ushort boxItem = 0,
+        int used = 0,
+        ushort extra = 0) =>
+            Add(character.Bag, items, itemId, count, wear, insert, fusion, pose, boxItem, used, extra);
 
     /// <summary>Takes items out of the character's bag, lowest slots first.</summary>
     /// <param name="character">The character whose bag is used.</param>
@@ -315,5 +343,69 @@ public static class Bag
                 split++;
             }
         return split;
+    }
+
+    /// <summary>
+    /// Tells the client about items <see cref="Add(Character, ItemData, ushort, int, byte, ushort, byte, ushort, ushort)"/> put in the bag with
+    /// 23/6, which the client places itself by the same rule. A stackable item goes in one message; an item that does not stack goes in one
+    /// message per stack, since the client puts the whole count of one message in a single slot.
+    /// </summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="items">Item.dat, for the stacking rule.</param>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="changes">The stacks the add touched, as Add returned them.</param>
+    /// <returns>The number of items added in all.</returns>
+    public static int SendObtained(GameSession session, ItemData items, ushort itemId, List<(BagItem Item, byte Added)> changes)
+    {
+        var total = changes.Sum(c => c.Added);
+        if (total == 0)
+            return 0;
+        if (IsStackable(items[itemId]))
+            session.Send(GroundMessages.ItemObtained(itemId, (ushort)total, changes[0].Item.Wear));
+        else
+            foreach (var (stack, added) in changes)
+                session.Send(GroundMessages.ItemObtained(itemId, added, stack.Wear));
+        return total;
+    }
+
+    /// <summary>Tells the client about stacks an add touched with 23/8 records that name each slot and carry the stack's attributes.</summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="changes">The stacks the add touched, as Add returned them.</param>
+    public static void SendAdded(GameSession session, List<(BagItem Item, byte Added)> changes)
+    {
+        foreach (var (s, added) in changes)
+            session.Send(
+                ItemMessages.BagAdd(
+                    new BagEntry
+                    {
+                        Slot = s.Slot, ItemId = s.ItemId, Count = added, Wear = s.Wear, Insert = s.Insert, FusionLevel = s.Fusion, PoseItemId = s.Pose,
+                        BoxItemId = s.BoxItem, UsedAmount = s.Used, ExtraAmount = s.Extra
+                    }));
+    }
+
+    /// <summary>Copies a grid, stack by stack, to try changes on without touching the real one.</summary>
+    /// <param name="bag">The grid.</param>
+    /// <returns>The copy.</returns>
+    public static List<BagItem> Trial(List<BagItem> bag) =>
+    [
+        .. bag.Select(
+            b => new BagItem
+            {
+                Slot = b.Slot, ItemId = b.ItemId, Count = b.Count, Wear = b.Wear, Insert = b.Insert, Fusion = b.Fusion, Pose = b.Pose, BoxItem = b.BoxItem,
+                Used = b.Used, Extra = b.Extra
+            })
+    ];
+
+    /// <summary>Takes items out of the stack at one slot of a grid, dropping the stack when it becomes empty.</summary>
+    /// <param name="bag">The grid.</param>
+    /// <param name="slot">The slot.</param>
+    /// <param name="count">How many to take.</param>
+    public static void TakeAt(List<BagItem> bag, byte slot, byte count)
+    {
+        if (bag.Find(b => b.Slot == slot) is not { } stack)
+            return;
+        stack.Count -= Math.Min(count, stack.Count);
+        if (stack.Count == 0)
+            bag.Remove(stack);
     }
 }

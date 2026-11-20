@@ -48,9 +48,14 @@ public sealed class PresentCaseHandlers(
             && piece.Pose == 0
             && session.Vehicle?.BagSlot != itemSlot)
         {
+            if (SlotFor(c, box, FullCase, piece) is not (> 0 and var slot))
+            {
+                logger.LogInformation("[{Session}] {Name}: no room for a packed Present Case", session.Id, c.Name);
+                return ValueTask.CompletedTask;
+            }
             c.Bag.Remove(piece);
             session.Send(ItemMessages.BagSlotDecrease(piece.Slot, 1));
-            Replace(session, c, box, FullCase, piece.ItemId, piece.Wear, piece.Insert, piece.Fusion);
+            Replace(session, c, box, slot, FullCase, piece.ItemId, piece.Wear, piece.Insert, piece.Fusion);
             session.Send(new PacketWriter(Action23.Code, Action23.PackingResult).U8(1).ToArray());
             logger.LogInformation("[{Session}] {Name} packs {Item} into a Present Case", session.Id, c.Name, items[piece.ItemId]?.Name.Trim());
         }
@@ -58,17 +63,40 @@ public sealed class PresentCaseHandlers(
         {
             var packed = box.BoxItem;
             var (wear, insert, fusion) = (box.Wear, box.Insert, box.Fusion);
-            Replace(session, c, box, packed, 0, wear, insert, fusion);
+            if (SlotFor(c, box, packed, null) is not (> 0 and var slot))
+                return ValueTask.CompletedTask;
+            Replace(session, c, box, slot, packed, 0, wear, insert, fusion);
             session.Send(new PacketWriter(Action23.Code, Action23.PackingResult).U8(1).ToArray());
             logger.LogInformation("[{Session}] {Name} opens a Present Case: {Item}", session.Id, c.Name, items[packed]?.Name.Trim());
         }
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Replaces the case in a bag slot with another item and sends the bag changes.</summary>
+    /// <summary>
+    /// Finds where the item that replaces one case goes: the case's own slot when it is the last of its stack, else a free slot of the bag
+    /// with one case and the packed piece taken out.
+    /// </summary>
+    /// <param name="c">The character.</param>
+    /// <param name="old">The case stack.</param>
+    /// <param name="newId">Item id of the replacement.</param>
+    /// <param name="gone">A stack that also leaves the bag, or null.</param>
+    /// <returns>The slot, or 0 when there is no room.</returns>
+    private byte SlotFor(Character c, BagItem old, ushort newId, BagItem? gone)
+    {
+        if (old.Count == 1)
+            return old.Slot;
+        var trial = Bag.Trial(c.Bag);
+        Bag.TakeAt(trial, old.Slot, 1);
+        if (gone is not null)
+            Bag.TakeAt(trial, gone.Slot, gone.Count);
+        return Bag.FreeSlot(trial, items, newId);
+    }
+
+    /// <summary>Takes one case out of its stack, puts the replacement in a slot and sends the bag changes.</summary>
     /// <param name="session">The player's session.</param>
     /// <param name="c">The character.</param>
-    /// <param name="old">The item now in the slot.</param>
+    /// <param name="old">The case stack.</param>
+    /// <param name="slot">The slot of the replacement, from <see cref="SlotFor"/>.</param>
     /// <param name="newId">Item id of the replacement.</param>
     /// <param name="boxItem">The packed item id carried by the replacement; 0 for none.</param>
     /// <param name="wear">Wear value the replacement gets.</param>
@@ -78,15 +106,18 @@ public sealed class PresentCaseHandlers(
         GameSession session,
         Character c,
         BagItem old,
+        byte slot,
         ushort newId,
         ushort boxItem,
         byte wear,
         ushort insert,
         byte fusion)
     {
-        c.Bag.Remove(old);
+        old.Count--;
+        if (old.Count == 0)
+            c.Bag.Remove(old);
         session.Send(ItemMessages.BagSlotDecrease(old.Slot, 1));
-        var made = new BagItem { Slot = old.Slot, ItemId = newId, Count = 1, Wear = wear, Insert = insert, Fusion = fusion, BoxItem = boxItem };
+        var made = new BagItem { Slot = slot, ItemId = newId, Count = 1, Wear = wear, Insert = insert, Fusion = fusion, BoxItem = boxItem };
         c.Bag.Add(made);
         session.Send(
             ItemMessages.BagAdd(

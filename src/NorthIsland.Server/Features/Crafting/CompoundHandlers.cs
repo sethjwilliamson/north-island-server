@@ -58,6 +58,14 @@ public sealed class CompoundHandlers(
     };
 
     /// <summary>
+    /// Tells whether a compound request is a stone mount rather than alchemy: any stone among the chosen items makes it one, even though equipment
+    /// now has material classes of its own.
+    /// </summary>
+    /// <param name="records">The item records of the chosen stacks.</param>
+    /// <returns>True when a stone is among them.</returns>
+    public static bool IsMount(IReadOnlyList<ItemRecord> records) => records.Any(Gems.IsStone);
+
+    /// <summary>
     /// Handles a compound request: mounts a stone when one is among the stacks, otherwise compounds the materials and replaces them with the product.
     /// </summary>
     /// <param name="session">The player's session.</param>
@@ -83,7 +91,7 @@ public sealed class CompoundHandlers(
         var books = records.Where(Alchemy.IsBook).ToList();
         var materials = records.Where(r => !Alchemy.IsBook(r)).ToList();
         var names = string.Join(" + ", records.Select(r => $"{r.Name.Trim()} (r{r.ShopColumn})"));
-        if (records.Exists(Gems.IsStone))
+        if (IsMount(records))
             return Mount(session, character, stacks!, records, names);
         var bless = materials.Count(Alchemy.IsBlessItem);
         if (books.Count > 1 || materials.Count < 2 || Alchemy.IsBook(records[0])

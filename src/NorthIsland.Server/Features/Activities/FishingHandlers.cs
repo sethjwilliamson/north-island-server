@@ -103,6 +103,7 @@ public sealed class FishingHandlers(
             while (true)
             {
                 await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, options.Value.FishingSeconds)), token).ConfigureAwait(false);
+                using var exclusive = await session.ExclusiveAsync().ConfigureAwait(false); // the catch goes in the bag between packets
                 if (session.ActiveCharacter is not { } character || GameRandom.Shared.Next(100) >= options.Value.FishingCatchPercent)
                     continue;
                 var maxRank = MaxCatchRank(kind, LifeSkills.FishingLevel(character));

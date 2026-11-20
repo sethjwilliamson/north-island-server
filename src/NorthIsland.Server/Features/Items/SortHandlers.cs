@@ -61,14 +61,15 @@ public static class SortHandlers
             return Busy;
         switch (grid)
         {
-            case Bag: // bag: sort and send the bag list
-                if (!GridSort.Sort(c.Bag, items, BagItem.LastSlot, World.Bag.Rows, World.Bag.MaxStack,
-                    b => b.Slot == session.Vehicle?.BagSlot || (c.PuppetBagSlot != 0 && b.Slot == c.PuppetBagSlot), first: bagFirst))
-                    return InOrder;
+            case Bag: // bag: sort, then clear the client's bag and send it again even when nothing moved, so a sort also mends a client bag that drifted
+            {
+                var sorted = GridSort.Sort(c.Bag, items, BagItem.LastSlot, World.Bag.Rows, World.Bag.MaxStack,
+                    b => b.Slot == session.Vehicle?.BagSlot || (c.PuppetBagSlot != 0 && b.Slot == c.PuppetBagSlot), first: bagFirst);
                 session.Send(new PacketWriter(Action23.Code, Action23.QolSort).U8(1).U8(Bag).ToArray());
                 if (c.Bag.Count > 0)
                     session.Send(ItemMessages.BagList(c.Bag.OrderBy(b => b.Slot).Select(Entry)));
-                return Sorted;
+                return sorted ? Sorted : InOrder;
+            }
             case Bank: // bank: sort and send its items
                 if (!GridSort.Sort(c.Bank, items, BagItem.LastSlot, World.Bag.Rows, World.Bag.MaxStack))
                     return InOrder;

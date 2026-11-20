@@ -30,7 +30,7 @@ public sealed class TransmitHandlers(
             return ValueTask.CompletedTask;
         var o = options.Value.Vehicles;
         var index = body.Span[0];
-        var vehicle = session.Vehicle is { Riding: true } riding ? c.Bag.Find(b => b.Slot == riding.BagSlot) : null;
+        var vehicle = session.Vehicle is { Riding: true } riding ? riding.StackIn(c) : null;
         var kind = vehicle is null ? 0 : TransmitRoutes.KindOf(vehicle.ItemId);
         var earth = kind == 3 && index == TransmitRoutes.EarthIndex; // 3 landing craft
         var target = earth ? Earth(session, c) : routes.Route(kind, index);

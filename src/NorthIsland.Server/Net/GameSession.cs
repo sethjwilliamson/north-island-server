@@ -111,6 +111,50 @@ public sealed class GameSession : IAsyncDisposable
     /// <summary>When the player latest arrived in the world or on a map.</summary>
     public DateTime ArrivedUtc { get; set; }
 
+    /// <summary>
+    /// The map changes (7/x) sent to the player that their client has not yet reported loaded (12/1). While one is outstanding, an event
+    /// trigger from the client may have been sent on the map the player left and name a door or NPC of that map. Changed with
+    /// Interlocked: a leader's warp counts its team members' map changes from the leader's packet handler.
+    /// </summary>
+    private int _unloadedMapChanges;
+
+    /// <summary>When the player's latest map change (7/x) was counted, in UTC ticks; read and written with Volatile.</summary>
+    private long _mapChangeSentTicks;
+
+    /// <summary>
+    /// Counts a map change about to be sent to the player. Called before the character's map is changed, so a trigger that is handled
+    /// on another thread and already sees the new map also sees the change outstanding.
+    /// </summary>
+    /// <param name="nowUtc">The current time.</param>
+    public void MapChangeSent(DateTime nowUtc)
+    {
+        Volatile.Write(ref _mapChangeSentTicks, nowUtc.Ticks);
+        Interlocked.Increment(ref _unloadedMapChanges);
+    }
+
+    /// <summary>Counts the client's report (12/1) that it loaded a map; extra reports, such as the first map's, are ignored.</summary>
+    public void MapChangeLoaded()
+    {
+        int count;
+        do
+        {
+            count = Volatile.Read(ref _unloadedMapChanges);
+            if (count == 0)
+                return;
+        }
+        while (Interlocked.CompareExchange(ref _unloadedMapChanges, count - 1, count) != count);
+    }
+
+    /// <summary>
+    /// True while a map change sent to the player is not yet loaded by their client, for at most a time so that a 12/1 that never comes
+    /// cannot hold the player for good.
+    /// </summary>
+    /// <param name="nowUtc">The current time.</param>
+    /// <param name="maxWait">The longest time a map change counts as outstanding.</param>
+    /// <returns>True while the client is still on the map it was moved off.</returns>
+    public bool IsLoadingMap(DateTime nowUtc, TimeSpan maxWait) =>
+        Volatile.Read(ref _unloadedMapChanges) > 0 && nowUtc.Ticks - Volatile.Read(ref _mapChangeSentTicks) < maxWait.Ticks;
+
     /// <summary>The NPCs (map, role) that may not touch this player again, with the time until which they cannot.</summary>
     public System.Collections.Concurrent.ConcurrentDictionary<(ushort Map, ushort Role), DateTime> TouchCooldown { get; } = new();
 
@@ -182,6 +226,41 @@ public sealed class GameSession : IAsyncDisposable
 
     /// <summary>Ends the outgoing queue; the writer then drains it and shuts the socket down.</summary>
     public void Close() => _outbox.Writer.TryComplete();
+
+    /// <summary>
+    /// Held while one piece of work changes the player's state: each incoming packet, and the timers that change the bag outside packets (a
+    /// manufacture finishing, a pet express or forage trip, a fish caught, a quiz prize, the vehicle drain). Without it a timer could change the
+    /// bag halfway through a packet handler, so that both pick the same free slot or send their bag packets in another order than they changed it.
+    /// </summary>
+    private readonly SemaphoreSlim _exclusive = new(1, 1);
+
+    /// <summary>Waits until no other work holds the player's state, then holds it until the result is disposed.</summary>
+    /// <returns>The hold; dispose it to let the next work in.</returns>
+    public async ValueTask<Exclusive> ExclusiveAsync()
+    {
+        await _exclusive.WaitAsync().ConfigureAwait(false);
+        return new Exclusive(_exclusive);
+    }
+
+    /// <summary>Holds the player's state when nothing else does, without waiting; for timers that can try again on their next tick.</summary>
+    /// <param name="held">The hold when taken; dispose it to let the next work in.</param>
+    /// <returns>True when the hold was taken.</returns>
+    public bool TryExclusive(out Exclusive held)
+    {
+        held = _exclusive.Wait(0) ? new Exclusive(_exclusive) : default;
+        return held.Held;
+    }
+
+    /// <summary>A hold on a session's state, from <see cref="ExclusiveAsync"/> or <see cref="TryExclusive"/>.</summary>
+    /// <param name="gate">The session's gate, or null for no hold.</param>
+    public readonly struct Exclusive(SemaphoreSlim? gate) : IDisposable
+    {
+        /// <summary>True when this holds the gate.</summary>
+        public bool Held => gate is not null;
+
+        /// <summary>Lets the next work in.</summary>
+        public void Dispose() => gate?.Release();
+    }
 
     /// <summary>Reads and dispatches packets until the client disconnects or the token is cancelled.</summary>
     /// <param name="ct">Stops the session.</param>

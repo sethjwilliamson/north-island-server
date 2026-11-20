@@ -85,17 +85,18 @@ public sealed partial class BattleHandlers
         monster.DropGiven = true;
         var share = new DropShare(npc, monster, felling.Count);
         var thrown = false;
-        foreach (var (itemId, regular) in new[] { (DropOf(share), true), (EventDropOf(share, calendar.Drops()), false) })
+        foreach (var (itemId, regular, table) in DropRolls(share, calendar.Drops()))
         {
             if (itemId is not { } id || items[id] is not { } item)
                 continue;
-            List<(GameSession Session, int Added)> got = [];
+            List<(GameSession Session, List<(BagItem Item, byte Added)> Changes)> got = [];
             foreach (var mine in felling.GroupBy(f => f.Session!))
             {
                 var session = mine.Key;
                 var character = session.ActiveCharacter!;
                 var times = mine.Count() * (regular && TimedEffects.DoubleDrop(character, TimedEffects.Now) ? 2 : 1);
-                var added = Bag.Add(character, items, id, times).Sum(c => c.Added);
+                var changes = Bag.Add(character, items, id, times);
+                var added = changes.Sum(c => c.Added);
                 if (added == 0)
                 {
                     logger.LogInformation(
@@ -106,7 +107,7 @@ public sealed partial class BattleHandlers
                         monster.Name);
                     continue;
                 }
-                got.Add((session, added));
+                got.Add((session, changes));
                 logger.LogInformation(
                     "[{Session}] {Name} gets {Item} x{Count} from {Monster} in battle{Table}",
                     session.Id,
@@ -114,7 +115,7 @@ public sealed partial class BattleHandlers
                     item.Name,
                     added,
                     monster.Name,
-                    regular ? "" : " (event table)");
+                    table);
             }
             if (got.Count == 0)
                 continue;
@@ -124,8 +125,8 @@ public sealed partial class BattleHandlers
                     monster.Row,
                     monster.Col,
                     felling.Where(f => got.Exists(g => ReferenceEquals(g.Session, f.Session))).Select(f => (f.Row, f.Col))));
-            foreach (var (session, added) in got)
-                session.Send(Protocol.Messages.Items.GroundMessages.ItemObtained(id, (ushort)added));
+            foreach (var (session, changes) in got)
+                Bag.SendObtained(session, items, id, changes);
             thrown = true;
         }
         return thrown;
@@ -140,7 +141,8 @@ public sealed partial class BattleHandlers
         var defeated = battle.Standalone ? []
             : battle.Monsters.Where(m => m.Npc is not null && !m.Captured).Select(m => m.Npc!).ToList();
         var o = options.Value;
-        int Share(Fighter? f, int level) => f is null || battle.Standalone ? 0 : BattleFormulas.ExpShare(battle.Monsters, f, level, o, winPlate);
+        int Share(Fighter? f, int level) =>
+            f is null || battle.Standalone ? 0 : BattleFormulas.ExpShare(battle.Monsters, f, level, o, formulas.Table, winPlate);
         var seasonalFactor = BattleFormulas.CappedExpMultipliers(calendar.ExpMultiplier(), 1, o.ExpMultiplierCap).Seasonal;
         int Seasonal(int rawExp) => (int)Math.Min(int.MaxValue, Math.Round(rawExp * seasonalFactor));
 
@@ -189,6 +191,12 @@ public sealed partial class BattleHandlers
             if (earns is not null && playerFighter is { BuffedPet: true })
                 own += BattleFormulas.BuffShare(buffShareBase, o.BuffSharePercent);
             own += flat;
+            // Without a running training state, a win on the Training Island gives no experience, to the player or to the pet.
+            if (TrainingIslandHandlers.IsUntrainedOnIsland(character))
+            {
+                own = 0;
+                earns = null;
+            }
             character.Exp = (int)Math.Min(int.MaxValue, (long)character.Exp + (long)Math.Round(own));
             shares.Add((winner, (int)Math.Round(own)));
             winner.Send(InnMessages.SetAttribute(Action8.AttrExp, character.Exp));
@@ -258,6 +266,35 @@ public sealed partial class BattleHandlers
         return monster.EventDropItem;
     }
 
+    /// <summary>Rolls every drop table for a monster: its own list, the seasonal event table and the level drop table.</summary>
+    /// <param name="share">The drop.</param>
+    /// <param name="seasonal">The seasonal event's drop table.</param>
+    /// <returns>Per table the item rolled or null, whether it is the regular drop that a double drop doubles, and the table's log label.</returns>
+    private (ushort? Item, bool Regular, string Table)[] DropRolls(DropShare share, IReadOnlyList<CalendarDrop> seasonal) =>
+    [
+        (DropOf(share), true, ""),
+        (EventDropOf(share, seasonal), false, " (event table)"),
+        (LevelDropOf(share), false, " (level table)"),
+    ];
+
+    /// <summary>Rolls the item a monster drops from the level drop table, once per monster fighter.</summary>
+    /// <param name="share">The drop.</param>
+    /// <returns>The item id, or null.</returns>
+    private ushort? LevelDropOf(DropShare share)
+    {
+        var table = options.Value.LevelDrops;
+        if (table.Count == 0)
+            return null;
+        if (share.Monster is not { } monster)
+            return BattleFormulas.LevelDrop(table, share.Npc.Level, GameRandom.Shared);
+        if (!monster.LevelDropRolled)
+        {
+            monster.LevelDropItem = BattleFormulas.LevelDrop(table, share.Npc.Level, GameRandom.Shared);
+            monster.LevelDropRolled = true;
+        }
+        return monster.LevelDropItem;
+    }
+
     /// <summary>Rolls the item a monster drops from its own list, once per monster fighter.</summary>
     /// <param name="share">The drop.</param>
     /// <returns>The item id, or null.</returns>
@@ -280,7 +317,8 @@ public sealed partial class BattleHandlers
     private int TrainingFlatExp(Data.Character character, List<NorthIsland.GameData.Npcs.NpcRecord> defeated)
     {
         var o = options.Value;
-        return o.TrainingIslandFlatExp > 0 && TrainingIslandHandlers.IsIslandMap(character.MapId) && defeated.Count > 0
+        return o.TrainingIslandFlatExp > 0 && TrainingIslandHandlers.IsIslandMap(character.MapId) && TrainingIslandHandlers.IsTraining(character)
+            && defeated.Count > 0
             ? o.TrainingIslandFlatExp : 0;
     }
 
@@ -300,7 +338,7 @@ public sealed partial class BattleHandlers
             logger.LogInformation("[{Session}] {Name} learns {Skill} ({Id})", session.Id, character.Name, skill.Name, skill.Id);
         }
 
-        var gold = options.Value.MonsterGoldRewards ? defeated.Sum(n => BattleFormulas.GoldReward(n, GameRandom.Shared)) : 0;
+        var gold = options.Value.MonsterGoldRewards ? defeated.Sum(n => BattleFormulas.GoldReward(n, GameRandom.Shared, options.Value)) : 0;
         if (gold > 0)
             Purse.Credit(session, character, gold);
 
@@ -310,16 +348,14 @@ public sealed partial class BattleHandlers
         {
             if (share.Monster is { DropGiven: true })
                 continue;
-            foreach (var (drop, regular) in new[] { (DropOf(share), true), (EventDropOf(share, seasonal), false) })
+            foreach (var (drop, regular, table) in DropRolls(share, seasonal))
             {
                 if (drop is not { } itemId || items[itemId] is null)
                     continue;
                 var times = share.Copies * (regular && TimedEffects.DoubleDrop(character, TimedEffects.Now) ? 2 : 1);
-                var added = Bag.Add(character, items, itemId, times).Sum(c => c.Added);
-                if (added == 0)
+                if (Bag.SendObtained(session, items, itemId, Bag.Add(character, items, itemId, times)) == 0)
                     continue;
-                session.Send(Protocol.Messages.Items.GroundMessages.ItemObtained(itemId, (ushort)added));
-                dropped.Add(items[itemId]!.Name + (regular ? "" : " (event)"));
+                dropped.Add(items[itemId]!.Name + table);
             }
         }
         logger.LogInformation("[{Session}] {Name} gains {Exp} exp ({Total} total), {Gold} gold{Drops}", session.Id, character.Name,

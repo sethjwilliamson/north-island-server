@@ -184,7 +184,10 @@ public sealed partial class BattleHandlers
     }
 
     /// <summary>The Skill.dat skill types the server plays.</summary>
-    private static readonly FrozenSet<byte> PlayableTypes = [1, 2, 3, 4, 5, 6, 7, 14, 15, 16, 19, 22];
+    private static readonly FrozenSet<byte> PlayableTypes = [1, 2, 3, 4, 5, 6, 7, ReviveType, 14, 15, 16, 19, 22];
+
+    /// <summary>The Skill.dat type of the skills that bring a fallen fighter back (Revival, Secular Feather).</summary>
+    private const byte ReviveType = 8;
 
     /// <summary>The id of the status effect that seals a fighter's skills.</summary>
     private const byte Seal = 178;
@@ -197,6 +200,8 @@ public sealed partial class BattleHandlers
     /// <returns>The target, or null when there is none for the skill's target type.</returns>
     private static Fighter? TargetOf(Battle battle, Fighter actor, BattleCommand cast, SkillRecord skill)
     {
+        if (skill.Type == ReviveType)
+            return FallenAllyAt(battle, actor, cast.TargetRow, cast.TargetCol);
         var chosen = battle.At(cast.TargetRow, cast.TargetCol) is { IsAlive: true } alive ? alive : null;
         var ally = chosen is not null && chosen.Side == actor.Side ? chosen : null;
         return skill.TargetType switch
@@ -209,6 +214,15 @@ public sealed partial class BattleHandlers
             _ => null, // any other target type: no target
         };
     }
+
+    /// <summary>Finds the fallen fighter of an actor's side in a cell, the only target a revive can have.</summary>
+    /// <param name="battle">The battle.</param>
+    /// <param name="actor">The fighter who revives.</param>
+    /// <param name="row">The chosen row.</param>
+    /// <param name="col">The chosen column.</param>
+    /// <returns>The fallen ally still in the battle, or null when the cell holds none.</returns>
+    private static Fighter? FallenAllyAt(Battle battle, Fighter actor, byte row, byte col) =>
+        battle.OwnSide.FirstOrDefault(f => f.Row == row && f.Col == col && f.Side == actor.Side && !f.IsAlive && !f.Left && !f.Captured);
 
     /// <summary>Plays a player's attempt to capture a monster as a pet.</summary>
     /// <param name="session">The player's session.</param>
@@ -262,7 +276,7 @@ public sealed partial class BattleHandlers
         await ActionPause(SkillTable.Capture, player, target, numbers: false).ConfigureAwait(false);
     }
 
-    /// <summary>Plays the use of an HP or SP restoring item on a fighter of the user's side.</summary>
+    /// <summary>Plays the use of an HP or SP restoring item on a fighter of the user's side, or of a revive item on a fallen one.</summary>
     /// <param name="session">The player's session.</param>
     /// <param name="battle">The battle.</param>
     /// <param name="user">The fighter who uses the item.</param>
@@ -271,7 +285,6 @@ public sealed partial class BattleHandlers
     {
         if (user.Session?.ActiveCharacter is not { } character)
             return;
-        var player = battle.At(use.TargetRow, use.TargetCol) is { IsAlive: true } ally && ally.Side == user.Side ? ally : user;
         var stack = character.Bag.Find(b => b.Slot == use.Extra && b.ItemId == use.SkillOrItem);
         var item = stack is null ? null : items[stack.ItemId];
         if (stack is null || item is null || item.Restores.Count == 0)
@@ -280,6 +293,22 @@ public sealed partial class BattleHandlers
                 use.SkillOrItem, use.Extra);
             return;
         }
+        // a revive item (Secular Feather) plays its linked type 8 skill, which the client lets land on a fallen fighter
+        var revive = item.LinkedSkillId != 0 && skills[item.LinkedSkillId] is { Type: ReviveType } linked ? linked : null;
+        Fighter player;
+        if (revive is not null)
+        {
+            if (FallenAllyAt(battle, user, use.TargetRow, use.TargetCol) is not { } fallen)
+            {
+                logger.LogWarning("[{Session}] {Player} uses revive item {Item} on ({Row},{Col}): no fallen ally there", session.Id, user.Name,
+                    item.Id, use.TargetRow, use.TargetCol);
+                return;
+            }
+            player = fallen;
+        }
+        else
+            player = battle.At(use.TargetRow, use.TargetCol) is { IsAlive: true } ally && ally.Side == user.Side ? ally : user;
+        var actionId = revive?.Id ?? SkillTable.ItemUsage;
 
         List<FighterValue> values = [];
         foreach (var (attr, amount) in item.Restores)
@@ -294,15 +323,17 @@ public sealed partial class BattleHandlers
                 player.Sp += gained;
             values.Add(new FighterValue(attr, gained, Negative: false));
         }
+        if (revive is not null)
+            Revived(battle, player);
         stack.Count--;
         if (stack.Count == 0)
             character.Bag.Remove(stack);
         user.Session.Send(Protocol.Messages.Items.ItemMessages.BagSlotDecrease(use.Extra, 1));
         battle.SendAttackArea(user);
-        battle.Send(client => BattleMessages.Action(user.Row, user.Col, SkillTable.ItemUsage,
+        battle.Send(client => BattleMessages.Action(user.Row, user.Col, actionId,
             [new ActionTarget(player.Row, player.Col, Hit: true, Guard: 0, values)], client));
         logger.LogInformation("[{Session}] {User} uses {Item} ({ItemName}) on {Target}: HP {Hp}/{MaxHp}, SP {Sp}/{MaxSp}", session.Id, user.Name,
             item.Id, item.Name, player.Name, player.Hp, player.MaxHp, player.Sp, player.MaxSp);
-        await ActionPause(SkillTable.ItemUsage, user, player).ConfigureAwait(false);
+        await ActionPause(actionId, user, player).ConfigureAwait(false);
     }
 }

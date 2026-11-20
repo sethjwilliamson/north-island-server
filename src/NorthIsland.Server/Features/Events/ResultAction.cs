@@ -24,8 +24,8 @@ public enum ResultAction
     /// <summary>Start a battle of the scene; its index is in <see cref="MappedResult.Service"/>.</summary>
     Battle,
 
-    /// <summary>Make the player play an action.</summary>
-    PlayerAction,
+    /// <summary>Show an emotion over the player; its number (1..19, picture E1nn) is in <see cref="MappedResult.Service"/>.</summary>
+    PlayerEmotion,
 
     /// <summary>Send the ready packet in <see cref="MappedResult.Packet"/>.</summary>
     Packet,

@@ -65,14 +65,19 @@ Environment variables such as `Server__GmAccounts` override them all.
 | `DefeatedMonsterHideSeconds` | How many seconds a monster that was beaten stays hidden on the map |
 | `BattleImmunitySeconds` | How many seconds after a battle a player cannot be drawn into a new fight |
 | `MonsterGoldRewards` | True when winning a battle also pays gold |
+| `GoldPerLevelMin` | The lowest gold a monster pays per level; the roll starts at level × this (0.1 gives a level 100 monster at least 10) |
+| `GoldPerLevelMax` | The highest gold a monster pays per level; the roll ends at level × this (1 gives a level 100 monster at most 100) |
 | `FieldEncounterCooldownSeconds` | The seconds after a field fight (and after arriving on a map) before the next field fight can start |
 | `FieldEncounterRadius` | How close in pixels a field monster's place or wander box must be to the player to be fought |
+| `FieldEncounterZones` | True when a field fight rolled inside an encounter zone of the map (a mine, 地雷塊) is taken from the zone's battle list; false fights only the field monsters around |
+| `FieldEncounterZonePercent` | The chance in percent that a field fight in an encounter zone comes from the zone rather than from field monsters that are near too; the other is tried when the first starts no battle |
 | `ElementAdvantageMultiplier` | The damage factor when the attacker's element overcomes the target's |
 | `ElementDisadvantageMultiplier` | The damage factor when the target's element overcomes the attacker's |
 | `DropToKillingBlowOnly` | True when only the fighters of the felling blow roll a monster's drops, instead of every winner |
 | `BurstMaxLevel` | The highest level that still earns burst experience |
 | `BurstDebuffBasePercent` | The percent of the combination damage paid as burst experience to a fighter who cast no debuff or buff |
-| `BurstDebuffStepPercent` | The percent added to that for each distinct debuff the fighter cast (hit or missed) and each distinct buff it put on an ally who did damage |
+| `BurstDebuffStepPercent` | The percent added to that for each distinct debuff the fighter cast on a monster (hit or missed; counted for that monster's combination damage) and each distinct buff it put on an ally who did damage (once a battle, for every monster) |
+| `DebuffStacking` | Which control and debuff statuses an enemy can carry at once. PerKind: one of each kind (control, with mess counted as one; Shrink or Cuss; Slowdown, Defence Down or Seal; poison), where a status of a kind already on misses, except that a control replaces a sleep and the same debuff cast again lasts longer. OnePerEnemy: any control or debuff misses while the enemy carries one |
 | `CussDamagePercent` | The percent more damage a target under Cuss takes |
 | `ShrinkDamagePercent` | The percent more damage a target under Shrink takes |
 | `FreezeDamagePercent` | The percent more damage a frozen target takes |
@@ -98,22 +103,44 @@ Environment variables such as `Server__GmAccounts` override them all.
 | `CaptureLevelsAbove` | How many levels above the catcher a monster may be and still be captured |
 | `MonsterNetLevels` | The levels added to CaptureLevelsAbove while the catcher wears a Monster Net that is not used up |
 | `CaptureHpBelowPercent` | A monster whose HP is this percent of its maximum or more cannot be captured; 0 turns the rule off |
+| `LevelDrops` | Items any monster in a level range may drop on top of its own item list (by default the Alchemy Books); an empty list turns them off |
+
+### Rows of `LevelDrops`
+
+Each row: Item = the item id that drops; MinLevel = the lowest monster level the row applies to; MaxLevel = the highest (0 means no upper bound); Percent = the chance in percent that a monster in the range drops the item. A monster rolls this table once, separately from its own list and the seasonal event table, and a Double Drop does not double it. The default bands follow the WLO Mobile guide; its drop rate is not known, so 0.5 is a guess.
+
+| Item | Name |
+|---|---|
+| 34009 | Alchemy Book 1 |
+| 34010 | Alchemy Book 2 |
+| 34011 | Alchemy Book 3 |
+| 34012 | Alchemy Book 4 |
 
 ## progression.json
 
 | Setting | What it does |
 |---|---|
-| `MonsterExpBase` | The base term of the experience a monster pays |
-| `MonsterExpPerLevel` | The experience term a monster pays per monster level |
-| `ExpPerLevelUnderMonster` | The experience term added per level the monster is above the fighter |
-| `ExpPerLevelOverMonster` | The experience term subtracted per level the monster is below the fighter |
+| `ExpMode` | Which formula decides the experience a monster pays: Classic (the default; the monster-level terms below) or LevelShare (each kill pays the experience the fighter needs for its next level divided by the kills per level below, so the grind follows a set curve) |
+| `KillsPerLevelBase` | The base term of the kills a first-run fighter needs per level in LevelShare mode (Base + Coef * level ^ Power, at least 1) |
+| `KillsPerLevelCoef` | The factor on the fighter's level raised to KillsPerLevelPower in the kills per level of a first-run fighter (LevelShare mode) |
+| `KillsPerLevelPower` | The power the fighter's level is raised to in the kills per level of a first-run fighter (LevelShare mode) |
+| `RebornKillsPerLevelBase` | The base term of the kills a reborn fighter needs per level (LevelShare mode) |
+| `RebornKillsPerLevelCoef` | The factor on the fighter's level raised to RebornKillsPerLevelPower in the kills per level of a reborn fighter (LevelShare mode) |
+| `RebornKillsPerLevelPower` | The power the fighter's level is raised to in the kills per level of a reborn fighter (LevelShare mode) |
+| `FightUpBonusPerLevelPercent` | The percent more experience per level a monster is above the fighter (LevelShare mode), 0 or more; a monster at or below the fighter uses LevelGapFullUpTo and LevelGapZeroFrom instead |
+| `FightUpBonusMaxPercent` | The largest percent more experience a monster above the fighter pays (LevelShare mode), 0 or more |
+| `LevelGapCeiling` | The highest fighter level used when a fighter above a monster is compared with it for experience, in both modes, so fighters above the top monsters still earn from them; a monster above the fighter's real level is still measured from that level (no fight-up bonus or under term for a monster below it); 0 or less turns it off |
+| `MonsterExpBase` | The base term of the experience a monster pays (Classic mode) |
+| `MonsterExpPerLevel` | The experience term a monster pays per monster level (Classic mode) |
+| `ExpPerLevelUnderMonster` | The experience term added per level the monster is above the fighter (Classic mode) |
+| `ExpPerLevelOverMonster` | The experience term subtracted per level the monster is below the fighter (Classic mode) |
 | `ExpSoloKillFactor` | The share of a monster's experience a fighter earns for felling it alone |
 | `ExpComboKillFactor` | The share of a monster's experience a fighter earns for felling it in a combination |
 | `ExpHitFactor` | The share of a monster's experience a fighter earns for hitting it without felling it |
 | `ExpPerExtraAction` | The share added to the experience for each action after the first on a monster |
 | `LevelGapFullUpTo` | The level lead over a monster up to which its experience is paid in full |
 | `LevelGapZeroFrom` | The level lead over a monster from which no experience is paid |
-| `TrainingIslandFlatExp` | The experience a win on the Training Island adds on top of the normal amount, for a player and a pet; events and potions do not raise it |
+| `TrainingIslandFlatExp` | The experience a win on the Training Island adds on top of the normal amount, for a player and a pet; events and potions do not raise it. Only while a Training Voucher, Ticket or Fare is running: without one, an island win gives no experience at all and no per-round heal (drops still come) |
 | `PetDefeatAmityLoss` | The amity a pet loses when it falls in a battle |
 | `PetDefeatExpLossPercent` | The percent of the current level's exp a pet loses when it falls; 0 means it loses amity only |
 | `PetAmityPerLevel` | The amity a pet gains for each level it gains |
@@ -160,6 +187,12 @@ Environment variables such as `Server__GmAccounts` override them all.
 | `HotSpring.MinutesPerPoint` | Minutes in the water per bonus step |
 | `HotSpring.MaxPerVisit` | The most steps one visit gives |
 | `HotSpring.PointsPerStep` | The bonus points added to the character's maximum HP and SP per step |
+| `Sitting` | Settings of the HP and SP recovery while sitting on the ground (the Social window's sit-down action, Alt+1 by default); the rates are guesses from forum posts |
+| `Sitting.Enabled` | Switches the recovery on or off |
+| `Sitting.TickSeconds` | Seconds between two recovery steps |
+| `Sitting.HpPerTick` | The HP one step gives back; 0 for none |
+| `Sitting.SpPerTick` | The SP one step gives back; 0 for none |
+| `Sitting.ActivePet` | True to give the active pet the same step |
 
 ## mall.json
 
@@ -370,7 +403,7 @@ Copy this file to the data folder (data/events.json) to change it; that copy win
 events[]:
   name           for the log
   mode           "Auto" (on inside its window), "On" (always, for testing), "Off"
-  start, end     yearly window "MM-dd", both days included; the end may be in the next year (12-31 .. 01-01)
+  start, end     yearly window "MM-dd", both days included; the end may be in the next year (12-25 .. 01-01)
   years          per-year windows for the lunar festivals, e.g. "2027": ["06-07", "06-16"]; they replace start / end
                  that year (a lunar festival with no row for this year is off)
   days           the days of the week the event is on, e.g. ["Saturday", "Sunday"]; used instead of the dates above
@@ -391,22 +424,87 @@ option ActivitiesAlwaysOpen is false. Server local time.
 
 Both end dates are included. The lunar festivals move every year, so their dates are listed under `years` in `events.json`.
 
-| Event | When | In the game |
-|---|---|---|
-| New Year | Dec 31 to Jan 1 | Monsters can drop the New Year gift box. |
-| Chinese New Year | 2 days before to 4 days after the lunar New Year | The Year Beast quest, Aunt Zhuang's fairy and the Red Pack wishes in Fishing Village, plus event drops. |
-| Valentine's Day | Feb 13 to Feb 15 | The Western Valentine's quest in Holy Village, plus event drops. |
-| Dragon Boat Festival | 2 days before to 7 days after the 5th of the 5th lunar month | The Dragon Boat quest and Qu Yuan's story in China, Xu Xian's trouble in Chang'an, and Dumpling drops. |
-| Qixi | 2 days before to 8 days after the 7th of the 7th lunar month | Ming and Ling's wedding invitations in Chang'an and the wishes on the bamboo in Kyoto, plus Qixi stories in Chang'an and Fishing Village. |
-| Mid-Autumn Festival | 2 days before to 7 days after the 15th of the 8th lunar month | The Mid-Autumn story in Chang'an, the Jade Rabbit in China, and Reunion Pack drops. |
-| Halloween | Oct 30 to Nov 1 | Double experience and pumpkin drops. |
-| Christmas | Dec 24 to Dec 30 | Santa Claus appears in Holy Village, plus event drops. |
-| White Day | Mar 12 to Mar 24 | The White Day event in Holy Village. |
-| Lantern Festival | 2 days before to 3 days after the 15th of the 1st lunar month | The Lantern Festival stories in Chang'an. |
-| Ghost Month | 6 days before to 8 days after Qixi | The Night Parade of a Hundred Demons in Fishing Village. |
-| Summer | Aug 10 to Aug 29 | The Summer Event in Holy Village. |
-| Thanksgiving | Nov 26 to Dec 10 | The Thanksgiving event. |
-| Double XP Weekend | Every Saturday and Sunday | Double experience. |
+| Event | When | In the game | Bags (common / big) |
+|---|---|---|---|
+| Winter Festival | Jan 2 to Jan 21 | Event drops only. | 2012 Sock / 2012 X'Mas Giftbox |
+| Chinese New Year | 2 days before to 4 days after the lunar New Year | The Year Beast quest, Aunt Zhuang's fairy and the Red Pack wishes in Fishing Village, plus event drops. | Golden Snake Pack / Deity Dragon Pack |
+| Valentine's Day | Feb 7 to Feb 15 | The Western Valentine's quest in Holy Village, plus event drops. | 2013 Valentine Box / 2013 Valentino Pack |
+| Lantern Festival | 2 days before to 3 days after the 15th of the 1st lunar month | The Lantern Festival stories in Chang'an, plus event drops. | 2013 Lantern Box / Lantern Blessings Box |
+| White Day | Mar 12 to Mar 24 | The White Day event in Holy Village, plus event drops. | White Day Box / 2013 White Day Gift |
+| Spring Festival | Mar 28 to Apr 18 | An egg hunt: event drops only. | 2012 Easter Pack / 2012 Super Easter Pack |
+| Anniversary | May 1 to May 21 | Event drops only; move it to the server's own anniversary. | 2011 Anniversary bag / Anniversary Big Bag |
+| Dragon Boat Festival | 2 days before to 7 days after the 5th of the 5th lunar month | The Dragon Boat quest and Qu Yuan's story in China, Xu Xian's trouble in Chang'an, plus event drops. | Dumpling Box / Golden Dumpling |
+| Summer | Jul 1 to Aug 29 | The Summer Event in Holy Village, plus event drops. | Cooling Box / 2011 Summer Gift Pack |
+| Artisan Festival | Sep 1 to Sep 14 | Event drops of forging and Lethe scrolls. | Pink Scrollwork Egg / Blue Scrollwork Egg |
+| Mid-Autumn Festival | 2 days before to 7 days after the 15th of the 8th lunar month | The Mid-Autumn story in Chang'an, the Jade Rabbit in China, plus event drops. | Reunion Pack / Super Reunion Pack |
+| Halloween | Oct 14 to Oct 31 | Double experience and event drops. | 2013 Spooky Pumpkin / 2013 Spooky Pack |
+| Thanksgiving | Nov 14 to Nov 30 | The Astrologian in the Civilian's House (map 12003) trades a 2013 Big Turkey and a 2013 Pumpkin Pie, both dropped by monsters, for a 2013 Big Box; repeatable. | 2013 Big Box (for a Turkey and a Pie) / 2013 Big Egg |
+| Christmas | Dec 1 to Dec 25 | Santa Claus in Holy Village (4 Happy Xmas Snowballs for a Christmas Gift Pack), Christmas music, plus event drops. | 2013 Sock / 2013 X'Mas Pack |
+| New Year | Dec 25 to Jan 1 | Event drops. | 2013 New Year Pack / 2013 Happiness Pack |
+| Double XP Weekend | Every Saturday and Sunday | Double experience. | – |
+
+Some event is on about 70% of the days of a year (Double XP Weekend not counted). Ghost Month and Qixi are left out:
+they always fall inside Summer, and one inside the other, so their drops would stack. Their quests (the Night Parade in
+Fishing Village, Ming and Ling's wedding, the bamboo wishes) only run while a calendar event lists their scripts; to bring
+one back, add an event with its `scripts` from the git history of this file.
+
+### Event prizes
+
+The event bags are meant to be the only way to get the Item Mall's items (as if the mall were closed); no bag gives a
+pet voucher or the 7 Colors Egg; the one random-pet prize is the Pet Egg (Spring Festival, Anniversary, Thanksgiving),
+whose pet starts at level 1 like every new pet. Each event's monsters drop its common bag (1.67% per monster) and, rarely,
+its big bag (0.0125%). The rates are set for a fast grinder at 20 kills a minute (1,200 kills an hour): about 20 common
+bags an hour and one big bag every 4 hours, counting the big bags found inside common bags (0.1 an hour from those and
+0.15 dropped). That works out to about one jackpot every 10 hours and one top prize every 100 hours, before choice cards.
+The bags are the client's own lucky bags (item type 41,
+which show their contents when previewed), except the Anniversary boxes, and their rows are in `Data/LuckyBags.tsv` and
+`Data/BoxGuesses.tsv` (or override them with `MallBoxes:LuckyBagsFile`). All bags follow one pattern (common bag weights
+out of 10,000, big bag weights out of 1,000):
+
+| Bag | Rows |
+|---|---|
+| Common | 4 foods, Wishing Coins or Bamboo Dragonflies (1060 each, 42.4%); 6 uncommons such as fireworks, scrolls, amity jellies, Delay Clocks, Alchemy Books 1 and 2 (550 each, 33%); 5 rares such as the suit boxes, ears boxes, the mall's own boxes, Gold Amity Jelly, Pet Lethe Scrolls, door vouchers, GPS, spars, Alchemy Books 3 and 4 (300 each, 15%); the event's big bag (50, 0.5%); one jackpot (15, 0.15%); a Bronze Card (590, 5.9%), a Silver Card (300, 3%) and a Golden Card (5, 0.05%) |
+| Big | 7 themed rares (95 each, 66.5%) and a Silver Card (35, 3.5%); 4 themed jackpots such as wings and robe boxes, saddles, Water Pack (Holy EXP potions), Transfer Mirror, Maid Box, Yacht, Bomb Diamonds, Potential Pill (60 each, 24%) and a Golden Card (20, 2%); 2 top prizes: the mall weapon boxes, Friendship Brooch, Fairy's Spar (17 each, 3.4%) and a Free Card (6, 0.6%) |
+
+The four choice cards (gift cards, `Data/GiftCards.tsv`) are exchanged for any one prize of their tier from every event,
+chosen by the player, so a prize whose event is months away is still within reach. Everything a common bag (or the 2013 Big
+Turkey) gives stacks, so opening them doesn't fill the bag window; the prizes that don't stack (the timed riceballs, EXP
+cards and grass, the bottle potions, costumes, hats and furniture) come from the Bronze and Silver Cards, which do, or from
+the big bags. Holiday items fill only their own event's bags.
+
+| Card | Choose one of |
+|---|---|
+| Bronze Card (50017) | the 57 uncommons, Alchemy Book 1, the Escape Button and the four bottle potions |
+| Silver Card (50018) | the 81 rares |
+| Golden Card (50019) | the 22 jackpots |
+| Free Card (50000) | the 12 top prizes |
+
+At 20 kills a minute that is about 1.2 Bronze Cards and 0.6 Silver Cards an hour. Outside its own event, getting a
+chosen prize takes about 1.5 to 5 times as many monsters as during it (about 1 in 1,000 kills for an uncommon, 2,000 for a
+rare, 80,000 for a jackpot and 800,000 for a top prize, against 350, 1,200, 26,000 and 170,000 in season). After changing a card's choices, raise `GiftCards.Flag` so clients reload their saved lists.
+
+The mall's real boxes are prizes too (Gift Pack, War Pack, Scroll Pack, Gear Pack with the pet gear, Transferred Pack,
+Water Pack, Maid Box, Crystal Ice Cube, Super Gift Box, Friendship Pumpkin, Thanksgiving Egg, 2010 Jolly Pack, Anniversary
+Big Bag 34302), with their pet voucher rows taken out of `Data/MallBoxes.tsv`.
+
+Mall items no event gives, on purpose:
+
+| Why | Items |
+|---|---|
+| Can be had another way (NPC shop, crafting, monster drops) | Registration Voucher, Boarded Voucher, Sky Banger, Dragon Banger, Pork Bone Noodle, Pork Miso Noodle, Mixed Noodles, Shape Clay, the vehicle fuels |
+| Pet food (permanent pet ability points) | the 12 "Adds 1 to ...'s ability" foods, Strengthen Pack |
+| Leveled pets | Holy Spirit, Jade Rabbit, Snow Monster, Mammoth and Gold Griffin Vouchers, Cerberus Ticket, 7 Colors Egg (the Pet Egg is the one random-pet prize) |
+| No use on this server (yet) | Loudspeaker (no world radio), VIP Card (shops don't discount), Wisdom Crystal, Fast Jet, Christmas Bell, Cocoa Nib, Soft Sweet, Spring Riddlepaper, Fixed Stick, and the battle throwables Grenade, Korean Cake, Big Bowling and Lollipop (using items in battle only heals) |
+| Weak food | Fruit Cake, Neapolitan Sundaes |
+| Boxes whose contents are given directly | Training Box, New Year Box, New Year Pack, 2011 Ghost Pack, 2011 Big Egg, Glazed Stone Bag, Magic Set Box, Glaze Bag |
+| Pet gear, in the Gear Pack | the 13 "Special for ..." pet gear pieces |
+
+The common bags can't be traded and the big bags (the year "Pack"s) can, as in the original game. The 2013 Big Turkey only
+opens into food, so trading it in is worth more; the 2013 Big Box it is traded for is Thanksgiving's common
+bag (the Pie and the Turkey drop at 1.67% each, so the Boxes come at the common bag rate), and the 2013 Big Egg its big bag.
+Christmas splits its common bags the same way: the Sock drops at 1.25% and the Happy Xmas Snowball at 1.67%, and 4
+Snowballs buy a Christmas Gift Pack (1.25 + 1.67 / 4 = 1.67).
+The Christmas Gift Pack and the Spring Red Pack (from the Chinese New Year script) use their event's common bag rows.
 
 National Treasure runs on Mondays and the 15-round challenge on Fridays, both from 7 to 9 pm server time.
 

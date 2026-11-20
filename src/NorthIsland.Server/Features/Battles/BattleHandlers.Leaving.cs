@@ -231,14 +231,6 @@ public sealed partial class BattleHandlers
                 session.Send(PetMessages.SetAttribute(activePet.Slot, Action8.AttrSp, activePet.Sp));
             }
 
-            if (!player.IsAlive && character.ActivePetId != 0)
-            {
-                character.ActivePetId = 0;
-                session.Send(PetMessages.Rest());
-                world.HidePet(session);
-                logger.LogInformation("[{Session}] {Name} fell: his pet rests", session.Id, character.Name);
-            }
-
             foreach (var (_, npc) in battle.Caught.Where(c => ReferenceEquals(c.Catcher, player)))
             {
                 var slot = Pets.FreeSlot(character);

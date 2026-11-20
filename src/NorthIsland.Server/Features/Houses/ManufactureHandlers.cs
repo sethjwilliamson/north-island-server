@@ -427,11 +427,27 @@ public sealed class ManufactureHandlers(
             return;
         }
         var started = job.StartedUtc;
-        _ = Task.Delay(left).ContinueWith(_ =>
+        _ = DeliverLaterAsync(session, job, started, left);
+    }
+
+    /// <summary>Waits out a job's time, then delivers it while holding the player's state, unless it was paused, restarted or the player left.</summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="job">The job to deliver.</param>
+    /// <param name="started">The job's start when it was scheduled.</param>
+    /// <param name="left">The milliseconds left.</param>
+    private async Task DeliverLaterAsync(GameSession session, MakeJob job, DateTime? started, int left)
+    {
+        try
         {
+            await Task.Delay(TimeSpan.FromMilliseconds(left)).ConfigureAwait(false);
+            using var exclusive = await session.ExclusiveAsync().ConfigureAwait(false);
             if (job.StartedUtc == started && session.ActiveCharacter?.MakeJobs.Contains(job) == true && world.IsOnline(session.Account?.LoginId ?? 0))
                 Deliver(session, job);
-        }, TaskScheduler.Default);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "[{Session}] manufacture delivery failed", session.Id);
+        }
     }
 
     /// <summary>

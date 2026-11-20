@@ -9,7 +9,7 @@ public enum AlchemyForm
     /// <summary>Junior Alchemy: the result follows the strongest class of the materials and can be up to 8 ranks below the lowest material.</summary>
     Junior,
 
-    /// <summary>Superior Alchemy: as Junior Alchemy, and an item that also has a material's class as its second class is preferred.</summary>
+    /// <summary>Superior Alchemy: as Junior Alchemy, and with a book a failure keeps the materials more often.</summary>
     Superior,
 
     /// <summary>A blessing: a result of any material's class.</summary>

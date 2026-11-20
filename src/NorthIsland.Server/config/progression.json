@@ -1,5 +1,15 @@
 {
   "Server": {
+    "ExpMode": "Classic",
+    "KillsPerLevelBase": 5,
+    "KillsPerLevelCoef": 0.5,
+    "KillsPerLevelPower": 2,
+    "RebornKillsPerLevelBase": 5,
+    "RebornKillsPerLevelCoef": 1.13,
+    "RebornKillsPerLevelPower": 2,
+    "FightUpBonusPerLevelPercent": 1.5,
+    "FightUpBonusMaxPercent": 50,
+    "LevelGapCeiling": 165,
     "MonsterExpBase": 1.5,
     "MonsterExpPerLevel": 0.5,
     "ExpPerLevelUnderMonster": 1.2,

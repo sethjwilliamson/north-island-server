@@ -22,7 +22,16 @@ public sealed class ExpressTicker(
             while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
                 foreach (var session in world.OnlineSessions().Where(s => s.PetJobs.Express is not null || s.PetJobs.Forage is not null).ToList())
                 {
-                    try { express.Tick(session); forage.Tick(session); }
+                    try
+                    {
+                        if (!session.TryExclusive(out var held)) // a packet is being handled: try again on the next tick
+                            continue;
+                        using (held)
+                        {
+                            express.Tick(session);
+                            forage.Tick(session);
+                        }
+                    }
                     catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogError(ex, "express tick failed"); }
                 }
         }

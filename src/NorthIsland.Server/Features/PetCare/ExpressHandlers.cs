@@ -77,7 +77,12 @@ public sealed class ExpressHandlers(
             return;
         var refusal = Check(session, c, job.TargetId, job.Stacks);
         if (refusal is null && world.SessionOf(job.TargetId) is { } target && target.ActiveCharacter is { } tc)
-            Deliver(session, c, target, tc, job);
+        {
+            if (!target.TryExclusive(out var held)) // the target is handling a packet: deliver on the next tick
+                return;
+            using (held)
+                Deliver(session, c, target, tc, job);
+        }
         else if (refusal is { } r)
             session.Send(ExpressMessages.Error(r.Code, r.Item));
         Finish(session, job);
@@ -107,10 +112,12 @@ public sealed class ExpressHandlers(
     /// </returns>
     private (byte Code, ushort Item)? Check(GameSession session, Character c, int targetId, List<(byte Slot, byte Count)> stacks)
     {
+        if (stacks.Select(s => s.Slot).Distinct().Count() != stacks.Count) // each bag slot at most once: two lines of one stack would send it twice
+            return (1, 0);
         foreach (var (slot, count) in stacks)
         {
             var stack = c.Bag.Find(b => b.Slot == slot);
-            if (stack is null || count == 0 || stack.Count < count || Bag.IsNoTrade(items, stack))
+            if (stack is null || count == 0 || stack.Count < count || Bag.IsNoTrade(items, stack) || session.Vehicle?.BagSlot == slot)
                 return (1, stack?.ItemId ?? 0);
         }
         if (world.SessionOf(targetId) is not { } target || target.ActiveCharacter is not { } tc || targetId == session.Account!.LoginId)
