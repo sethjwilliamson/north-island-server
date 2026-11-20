@@ -434,7 +434,7 @@ Both end dates are included. The lunar festivals move every year, so their dates
 | Artisan Festival | Sep 1 to Sep 14 | Event drops of forging and Lethe scrolls. | Pink Scrollwork Egg / Blue Scrollwork Egg |
 | Mid-Autumn Festival | 2 days before to 7 days after the 15th of the 8th lunar month | The Mid-Autumn story in Chang'an, the Jade Rabbit in China, plus event drops. | Reunion Pack / Super Reunion Pack |
 | Halloween | Oct 14 to Oct 31 | Double experience and event drops. | 2013 Spooky Pumpkin / 2013 Spooky Pack |
-| Thanksgiving | Nov 14 to Nov 30 | The Astrologian in the Civilian's House (map 12003) trades a 2013 Big Turkey and a 2013 Pumpkin Pie, both dropped by monsters, for a 2013 Big Box; repeatable. | 2013 Big Turkey + 2013 Pumpkin Pie / 2013 Big Egg |
+| Thanksgiving | Nov 14 to Nov 30 | The Astrologian in the Civilian's House (map 12003) trades a 2013 Big Turkey and a 2013 Pumpkin Pie, both dropped by monsters, for a 2013 Big Box; repeatable. | 2013 Big Box (for a Turkey and a Pie) / 2013 Big Egg |
 | Christmas | Dec 1 to Dec 25 | Santa Claus in Holy Village (4 Happy Xmas Snowballs for a Christmas Gift Pack), Christmas music, plus event drops. | 2013 Sock / 2013 X'Mas Pack |
 | New Year | Dec 25 to Jan 1 | Event drops. | 2013 New Year Pack / 2013 Happiness Pack |
 | Double XP Weekend | Every Saturday and Sunday | Double experience. | – |
@@ -448,14 +448,18 @@ one back, add an event with its `scripts` from the git history of this file.
 
 The event bags are meant to be the only way to get the Item Mall's items (as if the mall were closed); no bag gives a
 pet voucher or the 7 Colors Egg; the one random-pet prize is the Pet Egg (Spring Festival, Anniversary, Thanksgiving),
-whose pet starts at level 1 like every new pet. Each event's monsters drop its common bag (2% per monster) and, rarely,
-its big bag (0.15%). The bags are the client's own lucky bags (item type 41,
+whose pet starts at level 1 like every new pet. Each event's monsters drop its common bag (1.67% per monster) and, rarely,
+its big bag (0.0125%). The rates are set for a fast grinder at 20 kills a minute (1,200 kills an hour): about 20 common
+bags an hour and one big bag every 4 hours, counting the big bags found inside common bags (0.1 an hour from those and
+0.15 dropped). That works out to about one jackpot every 10 hours and one top prize every 100 hours, before choice cards.
+The bags are the client's own lucky bags (item type 41,
 which show their contents when previewed), except the Anniversary boxes, and their rows are in `Data/LuckyBags.tsv` and
-`Data/BoxGuesses.tsv` (or override them with `MallBoxes:LuckyBagsFile`). All bags follow one pattern (weights out of 1000):
+`Data/BoxGuesses.tsv` (or override them with `MallBoxes:LuckyBagsFile`). All bags follow one pattern (common bag weights
+out of 10,000, big bag weights out of 1,000):
 
 | Bag | Rows |
 |---|---|
-| Common | 4 potions, bottles or good foods (113 each, 45%); 6 themed uncommons such as riceballs, fireworks, festive hats, 2X EXP Copper/Silver Cards, grass, amity jellies (55 each, 33%); 5 themed rares such as costumes, maid suits, furniture, Gold EXP Cards, Space Contract, GPS, forging tools, the mall's own boxes (30 each, 15%); the event's big bag (30, 3%); one jackpot (8, 0.8%); a Bronze Card (18, 1.8%), a Silver Card (10, 1%) and a Golden Card (2, 0.2%) |
+| Common | 4 potions, bottles or good foods (1210 each, 48.4%); 6 themed uncommons such as riceballs, fireworks, festive hats, 2X EXP Copper/Silver Cards, grass, amity jellies (550 each, 33%); 5 themed rares such as costumes, maid suits, furniture, Gold EXP Cards, Space Contract, GPS, forging tools, the mall's own boxes (300 each, 15%); the event's big bag (50, 0.5%); one jackpot (15, 0.15%); a Bronze Card (190, 1.9%), a Silver Card (100, 1%) and a Golden Card (5, 0.05%) |
 | Big | 7 themed rares (95 each, 66.5%) and a Silver Card (35, 3.5%); 4 themed jackpots such as wings and robe boxes, saddles, Water Pack (Holy EXP potions), Transfer Mirror, Maid Box, Yacht, Bomb Diamonds, Potential Pill (60 each, 24%) and a Golden Card (20, 2%); 2 top prizes: the mall weapon boxes, Friendship Brooch, Fairy's Spar (17 each, 3.4%) and a Free Card (6, 0.6%) |
 
 The four choice cards (gift cards, `Data/GiftCards.tsv`) are exchanged for any one prize of their tier from every event,
@@ -468,9 +472,9 @@ chosen by the player, so a prize whose event is months away is still within reac
 | Golden Card (50019) | the 22 jackpots |
 | Free Card (50000) | the 12 top prizes |
 
-Outside its own event, getting a chosen prize takes about 3 to 4.5 times as many monsters as during it (about 1 in
-2,900 kills for an uncommon, 3,900 for a rare, 13,500 for a jackpot and 93,000 for a top prize, against 700, 1,150,
-4,100 and 21,000 in season). After changing a card's choices, raise `GiftCards.Flag` so clients reload their saved lists.
+Outside its own event, getting a chosen prize takes about 2.5 to 5.5 times as many monsters as during it (about 1 in
+3,200 kills for an uncommon, 5,700 for a rare, 80,000 for a jackpot and 800,000 for a top prize, against 580, 2,200,
+32,000 and 210,000 in season). After changing a card's choices, raise `GiftCards.Flag` so clients reload their saved lists.
 
 The mall's real boxes are prizes too (Gift Pack, War Pack, Scroll Pack, Gear Pack with the pet gear, Transferred Pack,
 Water Pack, Maid Box, Crystal Ice Cube, Super Gift Box, Friendship Pumpkin, Thanksgiving Egg, 2010 Jolly Pack, Anniversary
@@ -489,7 +493,10 @@ Mall items no event gives, on purpose:
 | Pet gear, in the Gear Pack | the 13 "Special for ..." pet gear pieces |
 
 The common bags can't be traded and the big bags (the year "Pack"s) can, as in the original game. The 2013 Big Turkey only
-opens into food and potions, so trading it in is worth more; the 2013 Big Box it is traded for uses the big bag pattern.
+opens into food and potions, so trading it in is worth more; the 2013 Big Box it is traded for is Thanksgiving's common
+bag (the Pie and the Turkey drop at 1.67% each, so the Boxes come at the common bag rate), and the 2013 Big Egg its big bag.
+Christmas splits its common bags the same way: the Sock drops at 1.25% and the Happy Xmas Snowball at 1.67%, and 4
+Snowballs buy a Christmas Gift Pack (1.25 + 1.67 / 4 = 1.67).
 The Christmas Gift Pack and the Spring Red Pack (from the Chinese New Year script) use their event's common bag rows.
 
 National Treasure runs on Mondays and the 15-round challenge on Fridays, both from 7 to 9 pm server time.
