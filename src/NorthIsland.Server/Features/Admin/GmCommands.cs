@@ -14,6 +14,7 @@ namespace NorthIsland.Server.Features.Admin;
 /// <param name="world">The world state, used to find online players and to move them.</param>
 /// <param name="store">The account store, to find and save accounts.</param>
 /// <param name="bans">The ban list.</param>
+/// <param name="sessions">The live session of each account, to disconnect a banned account that is at character select.</param>
 /// <param name="items">The item records for <c>/give</c>.</param>
 /// <param name="formulas">The formula tables, for the experience of a level.</param>
 /// <param name="combat">The combat stats, recalculated after a level change.</param>
@@ -24,6 +25,7 @@ public sealed class GmCommands(
     WorldState world,
     IAccountStore store,
     BanList bans,
+    AccountSessions sessions,
     ItemData items,
     FormulaData formulas,
     CombatStats combat,
@@ -118,7 +120,7 @@ public sealed class GmCommands(
         {
             "op" => await SetGmAsync(session, args, on: true).ConfigureAwait(false), // /op: makes an account a GM
             "deop" => await SetGmAsync(session, args, on: false).ConfigureAwait(false), // /deop: takes GM away from an account
-            "kick" => Kick(args), // /kick: disconnects an online player
+            "kick" => Kick(session, args), // /kick: disconnects an online player
             "ban" => Ban(session, args, address: false), // /ban: bans the account
             "ban-ip" => Ban(session, args, address: true), // /ban-ip: bans the account and the address
             "unban" => Unban(args), // /unban: lifts the bans of a name or address
@@ -184,30 +186,34 @@ public sealed class GmCommands(
     }
 
     /// <summary>Handles <c>/kick</c>: disconnects an online player.</summary>
+    /// <param name="session">The GM's session.</param>
     /// <param name="args">The command arguments: the name.</param>
     /// <returns>The reply line.</returns>
-    private string Kick(string[] args)
+    private string Kick(GameSession session, string[] args)
     {
         if (args.Length != 1)
             return "Usage: /kick <name>";
         if (Online(args[0]) is not { } target)
             return $"{args[0]} is not online.";
-        Disconnect(target);
+        Disconnect(session, target);
         return $"{args[0]} was kicked.";
     }
 
-    /// <summary>Tells a player's client it is disconnected and closes the connection.</summary>
+    /// <summary>
+    /// Tells a player's client it is disconnected, closes the connection and takes the player out of the world (<see cref="WorldState.Disconnect"/>).
+    /// </summary>
+    /// <param name="session">The GM's session, whose gate the command holds.</param>
     /// <param name="target">The player's session.</param>
-    private void Disconnect(GameSession target)
+    private void Disconnect(GameSession session, GameSession target)
     {
         logger.LogInformation("[{Session}] {Name} is kicked by a GM", target.Id, target.ActiveCharacter?.Name);
         target.Send(ServerMessages.Kick(KickReason.Disconnected));
-        target.Close();
-        world.Leave(target);
+        world.Disconnect(session, target);
     }
 
     /// <summary>
-    /// Handles <c>/ban</c> and <c>/ban-ip</c>: bans the account, and for an IP ban also the address of the online player, then disconnects the player.
+    /// Handles <c>/ban</c> and <c>/ban-ip</c>: bans the account, and for an IP ban also the address of the connected player, then disconnects
+    /// every session of the account: the one in the world and the one at character select.
     /// </summary>
     /// <param name="session">The GM's session.</param>
     /// <param name="args">The command arguments: the name.</param>
@@ -221,13 +227,14 @@ public sealed class GmCommands(
             return $"No player or account named {args[0]}.";
         if (ReferenceEquals(account, session.Account))
             return "You cannot ban yourself.";
-        var online = world.SessionOf(account.LoginId)!;
+        GameSession[] connected =
+            [.. new[] { world.SessionOf(account.LoginId), sessions.SessionOf(account.LoginId) }.OfType<GameSession>().Distinct()];
         IPAddress? ip = null;
         if (address)
         {
-            ip = online?.RemoteEndPoint?.Address;
+            ip = connected.Select(s => s.RemoteEndPoint?.Address).FirstOrDefault(a => a is not null);
             if (ip is null)
-                return $"{args[0]} must be online for an IP ban (the server keeps no addresses).";
+                return $"{args[0]} must be connected for an IP ban (the server keeps no addresses).";
             if (IPAddress.IsLoopback(ip) || BanList.Normal(ip) == (session.RemoteEndPoint is { } own ? BanList.Normal(own.Address) : null))
                 return $"{args[0]} plays from this PC or your own address ({BanList.Normal(ip)}); not banned, as it would lock you out too.";
         }
@@ -235,8 +242,8 @@ public sealed class GmCommands(
         var added = bans.BanAccount(account.Name, by);
         if (ip is not null)
             added |= bans.BanAddress(ip, account.Name, by);
-        if (online is not null)
-            Disconnect(online);
+        foreach (var target in connected)
+            Disconnect(session, target);
         return !added ? $"{args[0]} was already banned."
             : ip is null ? $"{args[0]} (account {account.Name}) is banned."
                 : $"{args[0]} (account {account.Name}, {BanList.Normal(ip)}) is banned.";
@@ -297,7 +304,10 @@ public sealed class GmCommands(
             : given < count ? $"{given} x {item.Name.Trim()} given; your bag is full." : $"{given} x {item.Name.Trim()} given.";
     }
 
-    /// <summary>Handles <c>/level</c>: sets the level of the GM or of a named online player.</summary>
+    /// <summary>
+    /// Handles <c>/level</c>: sets the level of the GM or of a named online player, under that player's gate (<see
+    /// cref="GameSession.TryExclusiveFrom"/>, as the GM's packet holds the GM's gate).
+    /// </summary>
     /// <param name="session">The GM's session.</param>
     /// <param name="args">The command arguments: the level and an optional name.</param>
     /// <returns>The reply line.</returns>
@@ -306,8 +316,25 @@ public sealed class GmCommands(
         if (args.Length is < 1 or > 2 || !int.TryParse(args[0], NumberStyles.None, CultureInfo.InvariantCulture, out var level))
             return "Usage: /level <level> [name]";
         var target = args.Length == 2 ? Online(args[1]) : session;
-        if (target?.ActiveCharacter is not { } character)
+        if (target is null)
             return $"{args[1]} is not online.";
+        if (!target.TryExclusiveFrom(session, out var held))
+        {
+            logger.LogWarning("[{Session}] GM /level of {Target}: refused, the player is busy or leaving", session.Id, args[1]);
+            return $"{args[1]} is busy or leaving; try again.";
+        }
+        using (held)
+            return LevelHeld(target, level);
+    }
+
+    /// <summary>Sets the level of a player whose gate the caller holds, after checking it can be set.</summary>
+    /// <param name="target">The player's session.</param>
+    /// <param name="level">The new level.</param>
+    /// <returns>The reply line.</returns>
+    private string LevelHeld(GameSession target, int level)
+    {
+        if (target.ActiveCharacter is not { } character)
+            return "The player is not online.";
         if (formulas.Table is null)
             return "Formula.dat is not loaded.";
         var max = FormulaTable.MaxLevel(character.RebornCount);

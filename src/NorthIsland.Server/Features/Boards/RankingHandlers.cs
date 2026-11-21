@@ -29,6 +29,56 @@ public sealed class RankingHandlers(
     /// <summary>The length of the level and money lists, and the number of rows per page.</summary>
     public const int Size = 100, PageSize = 15;
 
+    /// <summary>How long the sorted level and money lists are kept before they are built again from the accounts.</summary>
+    public static readonly TimeSpan ListLife = TimeSpan.FromMinutes(1);
+
+    /// <summary>The level and money lists as they were when built, copied out of the characters.</summary>
+    /// <param name="Levels">The level list: account id and row, best first.</param>
+    /// <param name="Money">The money list: account id and name, best first.</param>
+    /// <param name="Header">The "Updated" line sent with the level list.</param>
+    /// <param name="BuiltUtc">When the lists were built (UTC).</param>
+    private sealed record Lists(
+        List<(int Id, LevelRankRow Row)> Levels,
+        List<(int Id, string Name)> Money,
+        string Header,
+        DateTime BuiltUtc);
+
+    /// <summary>The lists last built; null before the first request.</summary>
+    private volatile Lists? _lists;
+
+    /// <summary>Guards the building of <see cref="_lists"/>, so that one request builds them while the others wait.</summary>
+    private readonly Lock _build = new();
+
+    /// <summary>Gets the level and money lists, building them again from every account when they are older than <see cref="ListLife"/>.</summary>
+    /// <returns>The current lists.</returns>
+    private Lists Current()
+    {
+        if (_lists is { } fresh && GameClock.UtcNow - fresh.BuiltUtc < ListLife)
+            return fresh;
+        lock (_build)
+        {
+            if (_lists is { } built && GameClock.UtcNow - built.BuiltUtc < ListLife)
+                return built;
+            var all = Everyone();
+            var lists = new Lists(
+                [.. ByLevel(all).Select(x => (x.Id, new LevelRankRow(x.Character.Job, x.Character.Level, x.Character.Name)))],
+                [.. ByMoney(all).Select(x => (x.Id, x.Character.Name))],
+                string.Create(CultureInfo.InvariantCulture, $"Updated {GameClock.Now:yyyy/MM/dd HH:mm}"),
+                GameClock.UtcNow);
+            _lists = lists;
+            return lists;
+        }
+    }
+
+    /// <summary>Sends the size of every list.</summary>
+    /// <param name="session">The player's session.</param>
+    private void SendCounts(GameSession session)
+    {
+        var lists = Current();
+        session.Send(BoardMessages.RankCounts(lists.Levels.Count, lists.Money.Count, (byte)rankings.Quiz().Count, (byte)rankings.PkTop().Count,
+            (byte)rankings.Compass().Count, 0));
+    }
+
     /// <summary>Starts sending fresh lists to every player in the world whenever the stored rankings change.</summary>
     internal void Start()
     {
@@ -43,9 +93,7 @@ public sealed class RankingHandlers(
     /// <param name="session">The player's session.</param>
     public void Refresh(GameSession session)
     {
-        var all = Everyone();
-        session.Send(BoardMessages.RankCounts(ByLevel(all).Count, ByMoney(all).Count, (byte)rankings.Quiz().Count,
-            (byte)rankings.PkTop().Count, (byte)rankings.Compass().Count, 0));
+        SendCounts(session);
         session.Send(BoardMessages.QuizRanks(1, rankings.Quiz().Take(PageSize)));
         session.Send(BoardMessages.PkRanks(1, Placed(rankings.PkTop().Select(r => r.Name))));
         session.Send(BoardMessages.EventRanks(5, 1, ServerCode, Placed(rankings.Compass()))); // 5 kind, 1 page
@@ -69,7 +117,7 @@ public sealed class RankingHandlers(
     public static List<(int Id, Character Character)> ByMoney(IEnumerable<(int Id, Character Character)> all) =>
         [.. all.OrderByDescending(x => (long)x.Character.Gold + x.Character.BankGold).ThenBy(x => x.Character.Name, StringComparer.Ordinal).Take(Size)];
 
-    /// <summary>Answers a ranking request for the list kind and page it names.</summary>
+    /// <summary>Answers a ranking request for the list kind and page it names, from the kept lists.</summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the list kind and the page.</param>
     internal ValueTask OnRequest(GameSession session, ReadOnlyMemory<byte> body)
@@ -78,13 +126,11 @@ public sealed class RankingHandlers(
             return ValueTask.CompletedTask;
         var (kind, page) = (body.Span[0], Math.Max((byte)1, body.Span[1]));
         var me = session.Account.LoginId;
-        int Rank(List<(int Id, Character Character)> list) => list.FindIndex(x => x.Id == me) is var i and >= 0 ? i + 1 : int.MaxValue;
+        int Rank<T>(List<(int Id, T Entry)> list) => list.FindIndex(x => x.Id == me) is var i and >= 0 ? i + 1 : int.MaxValue;
         switch (kind)
         {
             case 0: // 84/1 list 0: sends the size of every list
-                var all = Everyone();
-                session.Send(BoardMessages.RankCounts(ByLevel(all).Count, ByMoney(all).Count, (byte)rankings.Quiz().Count,
-                    (byte)rankings.PkTop().Count, (byte)rankings.Compass().Count, 0));
+                SendCounts(session);
                 break;
             case 3: // 84/1 list 3: a page of the quiz ranking
                 session.Send(BoardMessages.QuizRanks(page, rankings.Quiz().Skip((page - 1) * PageSize).Take(PageSize)));
@@ -96,14 +142,13 @@ public sealed class RankingHandlers(
                 session.Send(BoardMessages.EventRanks(kind, page, ServerCode, Placed(rankings.Compass())));
                 break;
             case 1: // 84/1 list 1: a page of the level ranking with the player's own rank
-                var levels = ByLevel(Everyone());
-                session.Send(BoardMessages.LevelRanks(page, levels.Skip((page - 1) * PageSize).Take(PageSize)
-                    .Select(x => new LevelRankRow(x.Character.Job, x.Character.Level, x.Character.Name)), Rank(levels),
-                    string.Create(CultureInfo.InvariantCulture, $"Updated {GameClock.Now:yyyy/MM/dd HH:mm}")));
+                var levels = Current();
+                session.Send(BoardMessages.LevelRanks(page, levels.Levels.Skip((page - 1) * PageSize).Take(PageSize).Select(x => x.Row),
+                    Rank(levels.Levels), levels.Header));
                 break;
             case 2: // 84/1 list 2: a page of the gold ranking with the player's own rank
-                var money = ByMoney(Everyone());
-                session.Send(BoardMessages.MoneyRanks(page, money.Skip((page - 1) * PageSize).Take(PageSize).Select(x => x.Character.Name), Rank(money)));
+                var money = Current().Money;
+                session.Send(BoardMessages.MoneyRanks(page, money.Skip((page - 1) * PageSize).Take(PageSize).Select(x => x.Name), Rank(money)));
                 break;
             case 6: // 84/1 list 6: an empty ranking
                 session.Send(BoardMessages.EmptyRanks(kind, page));

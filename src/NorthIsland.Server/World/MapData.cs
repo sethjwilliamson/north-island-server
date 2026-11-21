@@ -33,6 +33,12 @@ public sealed class MapData
     /// <summary>The zones read so far, by source map id.</summary>
     private readonly ConcurrentDictionary<int, IReadOnlyList<MapZone>> _zones = new();
 
+    /// <summary>The map sizes read so far, by source map id; null for a map the index does not hold (a house) or without the index.</summary>
+    private readonly ConcurrentDictionary<int, (int Width, int Height)?> _mapSizes = new();
+
+    /// <summary>For each map with a door into it, the first map holding such a door and that door, found on first use.</summary>
+    private readonly Lazy<Dictionary<ushort, (ushort From, EveConvey Convey)>> _firstDoorInto;
+
     /// <summary>Sets up lazy loading of the map files in the game data directory.</summary>
     /// <param name="options">The server options, for the game data directory.</param>
     /// <param name="logger">The logger.</param>
@@ -148,9 +154,6 @@ public sealed class MapData
         _sceneTable.Value?.Scenes.Where(s => s.Type != 7 && string.Equals(s.Name.Trim(), name.Trim(), StringComparison.OrdinalIgnoreCase))
             .Select(s => (ushort?)s.Id).Min();
 
-    /// <summary>For each map with a door into it, the first map holding such a door and that door, found on first use.</summary>
-    private readonly Lazy<Dictionary<ushort, (ushort From, EveConvey Convey)>> _firstDoorInto;
-
     /// <summary>The first door found that leads into a map.</summary>
     /// <param name="mapId">The map id.</param>
     /// <returns>The map holding the door and a warp built from the door, or null when no door leads there.</returns>
@@ -186,10 +189,12 @@ public sealed class MapData
         return first;
     }
 
-    /// <summary>The width and height of a map from the map zone index.</summary>
+    /// <summary>
+    /// The width and height of a map from the map zone index, that of its source map for an instance copy; read from disk once for each map.
+    /// </summary>
     /// <param name="mapId">The map id.</param>
-    /// <returns>The size, or null when unknown.</returns>
-    public (int Width, int Height)? MapSize(int mapId) => _zoneIndex.Value?.Size(mapId);
+    /// <returns>The size in pixels, or null when unknown (a house, or no map index).</returns>
+    public (int Width, int Height)? MapSize(int mapId) => _mapSizes.GetOrAdd(SourceMapId(mapId), id => _zoneIndex.Value?.Size(id));
 
     /// <summary>The flags byte of a map's scene.</summary>
     /// <param name="mapId">The map id.</param>

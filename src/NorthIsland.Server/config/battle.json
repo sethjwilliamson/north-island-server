@@ -16,7 +16,7 @@
     "ComboBasePercent": 50,
     "ComboChanceCurve": "Sliding",
     "ComboOddsLevels": "All",
-    "ComboRebornLevelBonus": 99,
+    "ComboRebornLevelBonus": 100,
     "ComboDamageBonusPercent": 0,
     "DefeatedMonsterHideSeconds": 30,
     "BattleImmunitySeconds": 5,
@@ -33,8 +33,8 @@
     "LevelDrops": [
       { "Item": 34009, "MinLevel": 50, "MaxLevel": 69, "Percent": 0.5 },
       { "Item": 34010, "MinLevel": 70, "MaxLevel": 89, "Percent": 0.5 },
-      { "Item": 34011, "MinLevel": 90, "MaxLevel": 119, "Percent": 0.5 },
-      { "Item": 34012, "MinLevel": 120, "MaxLevel": 0, "Percent": 0.5 }
+      { "Item": 34011, "MinLevel": 90, "MaxLevel": 109, "Percent": 0.5 },
+      { "Item": 34012, "MinLevel": 110, "MaxLevel": 0, "Percent": 0.5 }
     ],
     "BurstMaxLevel": 180,
     "BurstDebuffBasePercent": 0,
@@ -50,7 +50,8 @@
     "MaxDamagePerHit": 65535,
     "FervidityMessPercent": 14,
     "BuffSharePercent": 25,
-    "DefenceSaddleDivisor": 3,
+    "DefenceSaddleDivisor": 5,
+    "KnightSaddleSpeedPercent": 15,
     "FleeChancePercent": 70,
     "FleeSpeedWeight": 0.15,
     "FleeLevelStep": 0.01,

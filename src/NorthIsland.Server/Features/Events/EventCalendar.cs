@@ -246,16 +246,26 @@ public sealed class EventCalendar
     /// <summary>Tells whether an activity is open now by the weekly hours.</summary>
     /// <param name="activity">The activity name.</param>
     /// <returns>True when activities are always open, the activity has no hours listed, or now falls in one of its windows.</returns>
-    public bool ActivityOpen(string activity)
+    public bool ActivityOpen(string activity) => OpeningWindow(activity) is not null;
+
+    /// <summary>
+    /// Names the opening window of an activity that is open now. A window of the weekly hours is named by its date and start time; when
+    /// activities are always open, or the activity has no hours, the whole local day counts as one window.
+    /// </summary>
+    /// <param name="activity">The activity name, such as <see cref="ActivityQuiz"/>.</param>
+    /// <returns>The window's name; null when the activity is closed now.</returns>
+    public string? OpeningWindow(string activity)
     {
+        var now = Clock();
+        var day = now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         if (_activitiesAlwaysOpen)
-            return true;
+            return day;
         var hours = File.Activities.Where(a => string.Equals(a.Name, activity, StringComparison.OrdinalIgnoreCase)).ToList();
         if (hours.Count == 0)
-            return true;
-        var now = Clock();
-        return hours.Exists(h => h.Day == now.DayOfWeek && TimeOf(h.Start) is { } from && TimeOf(h.End) is { } to
+            return day;
+        var open = hours.Find(h => h.Day == now.DayOfWeek && TimeOf(h.Start) is { } from && TimeOf(h.End) is { } to
             && now.TimeOfDay >= from && now.TimeOfDay < to);
+        return open is null ? null : $"{day} {open.Start}";
     }
 
     /// <summary>Reads a time of day written as <c>h:mm</c>.</summary>

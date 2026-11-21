@@ -28,7 +28,7 @@ public sealed class PetVoucherHandlers(
 
     /// <summary>
     /// Uses a voucher: the pet joins the team in the first free slot and the voucher is used up; a full team or a pet of the same kind
-    /// (on the team or in the storage) refuses it.
+    /// (on the team, in the storage or asleep in a bed) refuses it.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the bag slot of the voucher.</param>
@@ -45,7 +45,8 @@ public sealed class PetVoucherHandlers(
             return ValueTask.CompletedTask;
         }
         var why = c.Pets.Count >= Pet.MaxPets ? "the team is full" : c.Pets.Exists(p => p.NpcId == npc.Id) ? "already has one"
-            : c.StoredPets.Exists(p => p.NpcId == npc.Id) ? "the pet keeper has one" : null;
+            : c.StoredPets.Exists(p => p.NpcId == npc.Id) ? "the pet keeper has one"
+                : Pets.SleepsInBed(c, npc.Id) ? "one sleeps in a bed" : null;
         if (why is not null)
         {
             logger.LogInformation("[{Session}] {Name}: {Item} refused ({Why})", session.Id, c.Name, item.Name.Trim(), why);

@@ -1,4 +1,3 @@
-using System.Collections.Immutable;
 using Microsoft.Extensions.Logging;
 using NorthIsland.Protocol.IO;
 using NorthIsland.Protocol.Messages.Items;
@@ -9,10 +8,12 @@ namespace NorthIsland.Server.Features.Travel;
 /// <summary>Serves the GPS items: record the spot a player stands on as a mark, teleport to a mark, and upgrade a GPS to the next tier.</summary>
 /// <param name="items">The item records.</param>
 /// <param name="world">The online sessions and maps.</param>
+/// <param name="travel">The teleport rule, for the maps a mark may be made on and a teleport may leave or reach.</param>
 /// <param name="logger">The logger.</param>
 public sealed class GpsHandlers(
     ItemData items,
     WorldState world,
+    TravelRules travel,
     ILogger<GpsHandlers> logger)
 {
     /// <summary>The item ids of the three GPS tiers (one, two and three marks) and of the crystal that upgrades a GPS.</summary>
@@ -20,15 +21,6 @@ public sealed class GpsHandlers(
         Advance = 34195, // Advance GPS
         Smart = 34373, // Smart GPS
         Crystal = 37257; // Memory Crystal
-
-    /// <summary>The maps where a mark cannot be made and where a teleport is refused.</summary>
-    public static readonly ImmutableArray<ushort> NoMarkMaps = [
-        10004, // Prison
-        10009, // Maze
-        12064, // 2F, the Capitol
-        13224, // Maze in Cave
-        10079, // Quiz Zone
-        10095]; // Quiz Zone
 
     /// <summary>Gives the number of marks a GPS item holds.</summary>
     /// <param name="itemId">The item id.</param>
@@ -75,8 +67,8 @@ public sealed class GpsHandlers(
     }
 
     /// <summary>
-    /// Records the player's position as a GPS mark (<c>74/1</c>). Refused in a battle, on a vehicle, in a house or on a map where marks are not
-    /// allowed.
+    /// Records the player's position as a GPS mark (<c>74/1</c>). Refused in a battle, on a vehicle, and on a map no teleport may reach (a
+    /// house, an instance copy, an event arena, the sea and the like, <see cref="TravelRules.ArrivalRefusal"/>).
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: u8 bag slot of the GPS, u8 mark number.</param>
@@ -87,7 +79,7 @@ public sealed class GpsHandlers(
         var (slot, point) = (body.Span[0], body.Span[1]);
         var stack = c.Bag.Find(b => b.Slot == slot);
         if (stack is null || point < 1 || point > Capacity(stack.ItemId) || session.Battle is not null || session.Vehicle is not null
-            || NoMarkMaps.Contains(c.MapId) || TentHandlers.IsHouseMap(c.MapId))
+            || travel.ArrivalRefusal(c.MapId) is not null)
             return ValueTask.CompletedTask;
         c.GpsMarks[(point - 1) * 3] = c.MapId;
         c.GpsMarks[(point - 1) * 3 + 1] = c.X;
@@ -98,8 +90,9 @@ public sealed class GpsHandlers(
     }
 
     /// <summary>
-    /// Teleports the player to a mark (<c>74/2</c>) and shows the arrival to the others on the target map. Refused in a battle, event, game, stall,
-    /// trade, team and similar states.
+    /// Teleports the player to a mark (<c>74/2</c>) and shows the arrival to the others on the target map. Refused by the teleport rule (busy
+    /// states, and a map that cannot be left or a mark on one that cannot be reached, as a mark made before the rule barred it), on a vehicle
+    /// and in a team.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: u8 bag slot of the GPS, u8 mark number.</param>
@@ -112,14 +105,14 @@ public sealed class GpsHandlers(
         var id = session.Account!.LoginId;
         if (stack is null || point < 1 || point > Capacity(stack.ItemId) || c.GpsMarks[(point - 1) * 3] == 0)
             return ValueTask.CompletedTask;
-        if (session.Battle is not null || session.Event is not null || session.Minigame is not null || session.Stalls.Any || session.Vehicle is not null
-            || session.Activities.Fishing is not null || session.Trades.Items is not null || session.Trades.Pets is not null || world.Teams.LeaderOf(id) != 0
-            || NoMarkMaps.Contains(c.MapId) || TentHandlers.IsHouseMap(c.MapId))
+        var (map, x, y) = (c.GpsMarks[(point - 1) * 3], c.GpsMarks[(point - 1) * 3 + 1], c.GpsMarks[(point - 1) * 3 + 2]);
+        var refusal = travel.TeleportRefusal(session, c, map)
+            ?? (session.Vehicle is not null ? "on a vehicle" : world.Teams.LeaderOf(id) != 0 ? "in a team" : null);
+        if (refusal is not null)
         {
-            logger.LogInformation("[{Session}] {Name}: GPS teleport refused", session.Id, c.Name);
+            logger.LogInformation("[{Session}] {Name}: GPS teleport to map {Map} refused: {Why}", session.Id, c.Name, map, refusal);
             return ValueTask.CompletedTask;
         }
-        var (map, x, y) = (c.GpsMarks[(point - 1) * 3], c.GpsMarks[(point - 1) * 3 + 1], c.GpsMarks[(point - 1) * 3 + 2]);
         logger.LogInformation("[{Session}] {Name} teleports by GPS to map {Map}", session.Id, c.Name, map);
         world.ChangeMap(session, new DoorWarp(map, x, y, 0));
         var arrived = new PacketWriter(Action74.Code, Action74.Teleport).I32(id).ToArray();

@@ -34,18 +34,22 @@ public static class PetEgg
         (30105, 10), // Gold Griffin
     ];
 
-    /// <summary>Picks a pet by weight.</summary>
+    /// <summary>Picks a pet by weight among the pets of the pool that are allowed.</summary>
     /// <param name="roll">Random source: <c>roll(n)</c> returns an integer from 0 to n - 1.</param>
-    /// <returns>The Npc.dat id of the pet.</returns>
-    public static ushort Roll(Func<int, int> roll)
+    /// <param name="allowed">Tells whether a pet (Npc.dat id) may be picked; null allows every pet of the pool.</param>
+    /// <returns>The Npc.dat id of the pet, or 0 when no pet of the pool is allowed.</returns>
+    public static ushort Roll(Func<int, int> roll, Func<ushort, bool>? allowed = null)
     {
-        var pick = roll(Pool.Sum(p => p.Weight));
-        foreach (var (npcId, weight) in Pool)
+        List<(ushort NpcId, int Weight)> pool = [.. Pool.Where(p => allowed is null || allowed(p.NpcId))];
+        if (pool.Count == 0)
+            return 0;
+        var pick = roll(pool.Sum(p => p.Weight));
+        foreach (var (npcId, weight) in pool)
         {
             if (pick < weight)
                 return npcId;
             pick -= weight;
         }
-        return Pool[^1].NpcId;
+        return pool[^1].NpcId;
     }
 }

@@ -1,6 +1,6 @@
 namespace NorthIsland.Server.Features.Guilds;
 
-/// <summary>The rules for guilds: the dismissal checks, how often they run and the guild limit.</summary>
+/// <summary>The rules for guilds: the dismissal checks, how often they run, the guild limit and the badge upload wait.</summary>
 public sealed class GuildOptions
 {
     /// <summary>Whether guilds that miss the checks are dismissed.</summary>
@@ -26,4 +26,7 @@ public sealed class GuildOptions
 
     /// <summary>The most guilds the server holds; 0 means no limit.</summary>
     public int MaxGuilds { get; set; }
+
+    /// <summary>Seconds a guild waits between two badge uploads.</summary>
+    public int BadgeUploadSeconds { get; set; } = 60;
 }

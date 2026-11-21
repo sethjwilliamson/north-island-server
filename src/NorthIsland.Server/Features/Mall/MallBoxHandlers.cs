@@ -86,7 +86,10 @@ public sealed class MallBoxHandlers(
     }
 
     /// <summary>
-    /// Opens a box from a bag slot: rolls one reward by weight, takes one box (and one key for the Purple Chest) and gives the reward when it fits.
+    /// Opens a box from a bag slot: checks that every reward of the box's table would fit with one box (and one key for the Purple Chest)
+    /// taken out, then rolls one reward by weight, takes the box and the key and gives the reward. The room is checked for every reward
+    /// before the roll, so a full bag refuses the box without a roll instead of refusing only the rewards that do not fit, which would let
+    /// a player open the box again and again until a wanted reward is the one that fits.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body after the action and sub code.</param>
@@ -100,14 +103,18 @@ public sealed class MallBoxHandlers(
             HatchPetEgg(session, c, stack);
             return ValueTask.CompletedTask;
         }
-        if (stack is null || !_tables.TryGetValue(stack.ItemId, out var table))
+        if (stack is null || !_tables.TryGetValue(stack.ItemId, out var rows))
         {
             logger.LogInformation("[{Session}] {Name}: bag slot {Slot} does not open as a box", session.Id, c.Name, body.Span[0]);
             return ValueTask.CompletedTask;
         }
-        var reward = MallBoxes.Roll(table, GameRandom.Shared.Next);
-        if (items[reward.ItemId] is null)
+        var boxName = items[stack.ItemId]?.Name.Trim() ?? stack.ItemId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        List<MallBoxEntry> table = [.. rows.Where(e => items[e.ItemId] is not null)];
+        if (table.Count == 0)
+        {
+            logger.LogWarning("[{Session}] {Name}: {Box} has no reward with a known item", session.Id, c.Name, boxName);
             return ValueTask.CompletedTask;
+        }
         BagItem? key = null;
         if (stack.ItemId == PurpleChest)
         {
@@ -118,22 +125,18 @@ public sealed class MallBoxHandlers(
                 return ValueTask.CompletedTask;
             }
         }
-        var trial = Bag.Trial(c.Bag);
-        Bag.TakeAt(trial, stack.Slot, 1);
-        if (key is not null)
-            Bag.TakeAt(trial, key.Slot, 1);
-        if (Bag.Add(trial, items, reward.ItemId, reward.Count).Sum(x => x.Added) != reward.Count)
+        if (table.Find(e => !Fits(c, stack, key, e)) is { } tooBig)
         {
             logger.LogInformation(
-                "[{Session}] {Name}: no room for {Item} x{Count} from {Box}",
+                "[{Session}] {Name}: no room for every reward of {Box} (not for {Item} x{Count}); not opened",
                 session.Id,
                 c.Name,
-                items[reward.ItemId]!.Name.Trim(),
-                reward.Count,
-                items[stack.ItemId]!.Name.Trim());
+                boxName,
+                items[tooBig.ItemId]!.Name.Trim(),
+                tooBig.Count);
             return ValueTask.CompletedTask;
         }
-        var boxName = items[stack.ItemId]!.Name.Trim();
+        var reward = MallBoxes.Roll(table, GameRandom.Shared.Next);
         var slot = stack.Slot;
         stack.Count--;
         if (stack.Count == 0)
@@ -151,22 +154,38 @@ public sealed class MallBoxHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Hatches a Pet Egg: a random pet joins the team, unless the team is full or already has that pet.</summary>
+    /// <summary>Tells whether one reward would fit in the bag once one box, and one key when there is one, are taken out, trying it on a copy.</summary>
+    /// <param name="c">The player's character.</param>
+    /// <param name="box">The box's bag stack.</param>
+    /// <param name="key">The key's bag stack, or null when the box needs none.</param>
+    /// <param name="reward">The reward to try.</param>
+    /// <returns>True when the whole count fits.</returns>
+    private bool Fits(Character c, BagItem box, BagItem? key, MallBoxEntry reward)
+    {
+        var trial = Bag.Trial(c.Bag);
+        Bag.TakeAt(trial, box.Slot, 1);
+        if (key is not null)
+            Bag.TakeAt(trial, key.Slot, 1);
+        return Bag.Add(trial, items, reward.ItemId, reward.Count).Sum(x => x.Added) == reward.Count;
+    }
+
+    /// <summary>
+    /// Hatches a Pet Egg: a random pet joins the team. The team has to have a free place, and the roll is only among the pets of the egg that
+    /// the player has neither in the team nor with the pet keeper, so the egg is used up on every roll. Refusing a rolled pet the player
+    /// already has, and keeping the egg, would let a player hatch the egg again and again until a wanted pet comes up.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="c">The player's character.</param>
     /// <param name="stack">The egg's bag stack.</param>
     private void HatchPetEgg(GameSession session, Character c, BagItem stack)
     {
-        var npcId = PetEgg.Roll(GameRandom.Shared.Next);
-        if (npcs[npcId] is not { } npc)
-            return;
-        byte? refusal = c.Pets.Count >= Pet.MaxPets ? Action83.PetSlotsFull
-            : c.Pets.Exists(p => p.NpcId == npcId) ? Action83.SamePet
-                : c.StoredPets.Exists(p => p.NpcId == npcId) ? Action83.KeeperHasPet
-                    : null;
-        if (refusal is { } code)
+        var npcId = c.Pets.Count >= Pet.MaxPets
+            ? (ushort)0
+            : PetEgg.Roll(GameRandom.Shared.Next, id => npcs[id] is not null && !c.Pets.Exists(p => p.NpcId == id) && !c.StoredPets.Exists(p => p.NpcId == id));
+        if (npcId == 0 || npcs[npcId] is not { } npc)
         {
-            logger.LogInformation("[{Session}] {Name}: Pet Egg refused (code {Code}, rolled {Pet})", session.Id, c.Name, code, npc.Name);
+            var code = c.Pets.Count >= Pet.MaxPets ? Action83.PetSlotsFull : Action83.SamePet;
+            logger.LogInformation("[{Session}] {Name}: Pet Egg refused (code {Code}: the team is full or has every pet of the egg)", session.Id, c.Name, code);
             session.Send(new NorthIsland.Protocol.IO.PacketWriter(Action83.Code, code).ToArray());
             return;
         }

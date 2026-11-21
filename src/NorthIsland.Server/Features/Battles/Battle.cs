@@ -32,10 +32,43 @@ public sealed class Battle
     public ushort MapId { get; init; }
 
     /// <summary>The player fighters, in the order they joined.</summary>
-    public List<Fighter> Players { get; } = [];
+    /// <remarks>
+    /// Replaced, never changed in place, under <see cref="Lock"/>: a round that walks the list while a player joins keeps walking the list
+    /// it started with.
+    /// </remarks>
+    public ImmutableList<Fighter> Players { get; private set; } = [];
 
-    /// <summary>The pet fighters of the players.</summary>
-    public List<Fighter> Pets { get; } = [];
+    /// <summary>The pet fighters of the players on the field, at most one per player.</summary>
+    /// <remarks>Replaced, never changed in place, under <see cref="Lock"/>, as <see cref="Players"/>.</remarks>
+    public ImmutableList<Fighter> Pets { get; private set; } = [];
+
+    /// <summary>
+    /// The pets that fell in this battle and were taken off the field when their owner called another pet; their fall is settled when
+    /// their owner leaves the battle, and none of them may be called back into it.
+    /// </summary>
+    public ImmutableList<Fighter> FallenPets { get; private set; } = [];
+
+    /// <summary>Takes a player's fallen pet off the field, to make room for the pet the player calls next.</summary>
+    /// <param name="player">The owner's fighter.</param>
+    public void RetireFallenPet(Fighter player)
+    {
+        if (PetOf(player) is not { } fallen)
+            return;
+        Pets = Pets.Remove(fallen);
+        FallenPets = FallenPets.Add(fallen);
+    }
+
+    /// <summary>Tells whether a pet fell in this battle: it lies fallen on the field or was taken off it fallen.</summary>
+    /// <param name="player">The owner's fighter.</param>
+    /// <param name="pet">The pet.</param>
+    /// <returns>True when the pet may not be called into the battle again.</returns>
+    public bool PetFell(Fighter player, Pet pet) =>
+        Pets.Concat(FallenPets).Any(f => f.OwnerId == player.Id && ReferenceEquals(f.OwnedPet, pet) && !f.IsAlive);
+
+    /// <summary>The pets of a player that fell in this battle and were taken off the field.</summary>
+    /// <param name="player">The owner's fighter.</param>
+    /// <returns>The fallen pet fighters.</returns>
+    public IEnumerable<Fighter> FallenPetsOf(Fighter player) => FallenPets.Where(f => f.OwnerId == player.Id);
 
     /// <summary>The first player to join, who started the battle.</summary>
     public Fighter Player => Players[0];
@@ -329,6 +362,7 @@ public sealed class Battle
     /// <param name="character">The character who fights.</param>
     /// <param name="playerId">The player's login id.</param>
     /// <param name="source">The event battle that lists the monsters and their positions.</param>
+    /// <param name="mapId">The map whose event started the battle.</param>
     /// <param name="npcs">Looks up an NPC record by id.</param>
     /// <param name="sourceRole">The role of the map NPC that started the battle, 0 for none.</param>
     /// <param name="session">The player's session, or null.</param>
@@ -339,13 +373,14 @@ public sealed class Battle
         Character character,
         int playerId,
         EveBattle source,
+        ushort mapId,
         Func<ushort, NpcRecord?> npcs,
         ushort sourceRole = 0,
         GameSession? session = null,
         Func<ushort, ItemRecord?>? items = null,
         CombatStats? combat = null)
     {
-        var battle = new Battle { EventBattleIndex = source.Index, SourceRole = sourceRole, MapId = character.MapId, Combat = combat };
+        var battle = new Battle { EventBattleIndex = source.Index, SourceRole = sourceRole, MapId = mapId, Combat = combat };
         battle.AddPlayer(character, playerId, session, PlayerCol, npcs, items);
 
         var members = source.Left.Where(m => npcs(m.Id) is not null).Select(m => (Npc: npcs(m.Id)!, Position: m.Unknown2)).ToList();
@@ -477,9 +512,10 @@ public sealed class Battle
             MagicDefence = Worn(character.Equipment, AttrMagicDefence),
             CriticalPercent = Critical(character.Equipment),
             HalvesTargetSp = Pestle(character.Equipment),
+            NormalAttackId = NormalAttacks.OfPlayer(items, character.Equipment),
             Session = session,
         };
-        Players.Add(player);
+        Players = Players.Add(player);
         if (character.ActivePetId != 0 && character.Pets.Find(p => p.NpcId == character.ActivePetId) is { } pet)
             AddPet(pet, player, session, petRow, npcs, items);
         return player;
@@ -530,10 +566,11 @@ public sealed class Battle
             CriticalPercent = WornCritical(items, pet.Equipment),
             HalvesTargetSp = WornPestle(items, pet.Equipment),
             Npc = npcs(pet.NpcId),
+            NormalAttackId = NormalAttacks.OfPet(npcs(pet.NpcId), items, pet.Equipment), // its counters before its first attack
             OwnedPet = pet,
             Session = session,
         };
-        Pets.Add(fighter);
+        Pets = Pets.Add(fighter);
         return fighter;
     }
 

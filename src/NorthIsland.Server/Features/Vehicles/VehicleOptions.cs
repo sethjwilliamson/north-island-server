@@ -24,4 +24,19 @@ public sealed class VehicleOptions
 
     /// <summary>The fuel a transmit trip takes from the ridden vehicle; 0 means a trip costs nothing.</summary>
     public int TransmitFuel { get; set; }
+
+    /// <summary>
+    /// The maps no vehicle may be placed or boarded on, on top of houses and the Quiz Zones (the client's placingRefusal: the Wedding Hall,
+    /// the Capitol's arenas, the Altar and the Trojan War maps).
+    /// </summary>
+    public ushort[] NoVehicleMaps { get; set; } = [10085, // Wedding Hall
+        12064, // 2F, the Capitol
+        12065, // 4F, the Capitol
+        12766, // Altar
+        10065, // Trojan Round 1
+        10066, // Trojan Round 2
+        10068]; // Trojan Round 3
+
+    /// <summary>The scene types that take no vehicle (the client's placingRefusal).</summary>
+    public int[] NoVehicleSceneTypes { get; set; } = [8, 9, 11, 14]; // scene types 8, 9, 11 and 14 (14: the sea)
 }

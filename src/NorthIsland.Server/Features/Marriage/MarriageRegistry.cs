@@ -157,12 +157,15 @@ public sealed class MarriageRegistry
         return application;
     }
 
-    /// <summary>Turns an application into a couple, refreshing both cards from the characters, and saves.</summary>
+    /// <summary>
+    /// Turns an application into a couple, refreshing both cards from the characters, and saves; refused when the application is no longer in the
+    /// book (expired or replaced) or either partner is already married.
+    /// </summary>
     /// <param name="application">The application to complete.</param>
     /// <param name="groom">The groom's character.</param>
     /// <param name="bride">The bride's character.</param>
-    /// <returns>The new couple.</returns>
-    public Couple Marry(MarriageApplication application, Character groom, Character bride)
+    /// <returns>The new couple, or null when the marriage was refused.</returns>
+    public Couple? Marry(MarriageApplication application, Character groom, Character bride)
     {
         var couple = new Couple
         {
@@ -174,6 +177,8 @@ public sealed class MarriageRegistry
         couple.Wife.Refresh(bride);
         lock (Lock)
         {
+            if (!_book.Applications.Contains(application) || _book.Couples.Exists(c => c.Has(application.GroomId) || c.Has(application.BrideId)))
+                return null;
             _book.Applications.Remove(application);
             _book.Couples.Add(couple);
         }

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using NorthIsland.Protocol.IO;
@@ -25,13 +26,27 @@ public sealed class BoardHandlers(
     /// <summary>Service id of the Top 100 window.</summary>
     public const int Top100Service = 19;
 
+    /// <summary>Shortest time between two notices of one account.</summary>
+    public static readonly TimeSpan PostWait = TimeSpan.FromSeconds(30);
+
     /// <summary>The notice each session opened last, which a reply is addressed to.</summary>
     private readonly ConditionalWeakTable<GameSession, StrongBox<int>> _opened = [];
 
-    /// <summary>Shows the notice board window.</summary>
+    /// <summary>The map on which each session was last shown the public notice board by its NPC.</summary>
+    private readonly ConditionalWeakTable<GameSession, StrongBox<ushort>> _boardShown = [];
+
+    /// <summary>The posting form (82/8) each session was last shown: true for the guild board, false for the public one; a post uses it up.</summary>
+    private readonly ConditionalWeakTable<GameSession, StrongBox<bool>> _formShown = [];
+
+    /// <summary>When each account last posted a notice (UTC), by login id.</summary>
+    private readonly ConcurrentDictionary<int, DateTime> _lastPost = new();
+
+    /// <summary>Shows the notice board window and notes the map, so that the public board's posting form may be asked for there.</summary>
     /// <param name="session">The player's session.</param>
     public void OpenNoticeBoard(GameSession session)
     {
+        if (session.ActiveCharacter is { } character)
+            _boardShown.AddOrUpdate(session, new StrongBox<ushort>(character.MapId));
         session.Send(BoardMessages.NoticeBoardShow());
         logger.LogInformation("[{Session}] notice board", session.Id);
     }
@@ -136,19 +151,35 @@ public sealed class BoardHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Answers a request to write a notice: shows the form, or tells that the board is full.</summary>
+    /// <summary>
+    /// Answers a request to write a notice: shows the form, or tells that the board or the player's share of it is full. The public board's form is
+    /// only shown on the map where its NPC showed the board.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="guild">True for the guild board.</param>
     internal ValueTask OnAskAdd(GameSession session, bool guild)
     {
-        if (InWorld(session) is not (_, var id) || BoardOf(id, guild) is not { } board)
+        if (InWorld(session) is not (var character, var id) || BoardOf(id, guild) is not { } board)
             return ValueTask.CompletedTask;
-        var full = boards.Notices(board).Count >= (guild ? BoardRegistry.GuildMaxNotices : BoardRegistry.PublicMaxNotices);
-        session.Send(full ? BoardMessages.NoticeFull() : BoardMessages.NoticeShowSend(guild));
+        if (!guild && (!_boardShown.TryGetValue(session, out var map) || map.Value != character.MapId))
+        {
+            logger.LogWarning("[{Session}] {Name}: asks to post on the public board without its NPC", session.Id, character.Name);
+            return ValueTask.CompletedTask;
+        }
+        if (!boards.HasRoom(board, id))
+        {
+            session.Send(BoardMessages.NoticeFull());
+            return ValueTask.CompletedTask;
+        }
+        _formShown.AddOrUpdate(session, new StrongBox<bool>(guild));
+        session.Send(BoardMessages.NoticeShowSend(guild));
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Posts a new notice from the submitted form and shows the first page.</summary>
+    /// <summary>
+    /// Posts a new notice from the submitted form and shows the first page. Refused without a posting form the server showed for that board, with a
+    /// title or text longer than the form allows, or within <see cref="PostWait"/> of the account's last notice.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body with the title and text.</param>
     /// <param name="guild">True for the guild board.</param>
@@ -156,22 +187,44 @@ public sealed class BoardHandlers(
     {
         if (InWorld(session) is not (var character, var id) || BoardOf(id, guild) is not { } board)
             return ValueTask.CompletedTask;
+        if (!_formShown.TryGetValue(session, out var form) || form.Value != guild)
+        {
+            logger.LogWarning("[{Session}] {Name}: notice posted without the posting form", session.Id, character.Name);
+            return ValueTask.CompletedTask;
+        }
         var r = new PacketReader(body.Span);
         var title = GameEncoding.GetString(r.Bytes(Math.Max(0, r.I32()))).Trim();
         var text = GameEncoding.GetString(r.Bytes(Math.Max(0, r.I32()))).Trim();
         if (title.Length == 0 || text.Length == 0)
             return ValueTask.CompletedTask;
+        if (title.Length > BoardRegistry.MaxTitle || text.Length > BoardRegistry.MaxText)
+        {
+            logger.LogWarning("[{Session}] {Name}: notice refused, title {Title} / text {Text} characters", session.Id, character.Name, title.Length,
+                text.Length);
+            return ValueTask.CompletedTask;
+        }
+        var now = GameClock.UtcNow;
+        if (_lastPost.TryGetValue(id, out var last) && now - last < PostWait)
+        {
+            logger.LogWarning("[{Session}] {Name}: notice refused, posted too soon after the last one", session.Id, character.Name);
+            return ValueTask.CompletedTask;
+        }
+        _formShown.Remove(session);
         if (boards.Post(board, id, character.Name, title, text, GameClock.Now.ToOADate()) is null)
         {
             session.Send(BoardMessages.NoticeFull());
             return ValueTask.CompletedTask;
         }
+        _lastPost[id] = now;
         SendPage(session, board, guild, 1);
         logger.LogInformation("[{Session}] {Name} posts '{Title}' on the {Board} board", session.Id, character.Name, title, guild ? "guild" : "public");
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Delivers a reply as a mail to the author of the notice the player opened last.</summary>
+    /// <summary>
+    /// Delivers a reply as a mail to the author of the notice the player opened last; the author's block list applies, and the text is capped and
+    /// rate limited like a friend mail.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body with the author's name and the reply text.</param>
     internal ValueTask OnReply(GameSession session, ReadOnlyMemory<byte> body)
@@ -184,8 +237,13 @@ public sealed class BoardHandlers(
         var text = r.RestString();
         if (!_opened.TryGetValue(session, out var opened) || boards.Notice(opened.Value) is not { } notice || text.Length == 0)
             return ValueTask.CompletedTask;
+        if (text.Length > FriendHandlers.MaxMailText || !FriendHandlers.TakeMailTurn(session))
+        {
+            logger.LogWarning("[{Session}] {Name}: notice reply refused ({Length} characters, or too soon)", session.Id, character.Name, text.Length);
+            return ValueTask.CompletedTask;
+        }
         logger.LogInformation("[{Session}] {Name} answers notice {Id} of {Author}", session.Id, character.Name, notice.Id, notice.Author);
-        return new ValueTask(mail.DeliverAsync(id, notice.AuthorId, $"[{notice.Title}] {text}"));
+        return new ValueTask(mail.DeliverAsync(id, notice.AuthorId, $"[{notice.Title}] {text}", session));
     }
 
     /// <summary>Gets the active character and account id of a session that is in the world.</summary>

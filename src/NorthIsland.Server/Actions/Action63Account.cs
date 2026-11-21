@@ -10,9 +10,9 @@ public sealed class Action63Account(
     public byte Code => Action63.Code;
 
     public void Register(ActionRoutes routes) => routes
-        .On(Action63.BackToLogin, "back to login", LoginHandlers.OnBackToLogin) // 63/0: go back to the login stage and forget the account
+        .On(Action63.BackToLogin, "back to login", login.OnBackToLogin) // 63/0: go back to the login stage and forget the account
         .On(Action63.NumericLogin, "numeric login", login.OnNumericLogin) // 63/1: log in with a prefix and a number
         .On(Action63.SelectSlot, "select slot", login.OnSelectSlot) // 63/2: pick a character slot, or start creating in an empty one
-        .On(Action63.CancelCreation, "cancel creation", LoginHandlers.OnCancelCreation) // 63/3: cancel character creation and return to slot select
+        .On(Action63.CancelCreation, "cancel creation", login.OnCancelCreation) // 63/3: cancel character creation and return to slot select
         .On(Action63.AccountLogin, "account login", login.OnAccountLogin); // 63/4: log in with account name and password
 }

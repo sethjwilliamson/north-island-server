@@ -94,8 +94,14 @@ public sealed class HouseDecorHandlers(
         if (InOwnHouse(session) is not { } c || body.Length < 1)
             return ValueTask.CompletedTask;
         var stack = c.Bag.Find(b => b.Slot == body.Span[0]);
-        if (stack is null || session.Vehicle?.BagSlot == stack.Slot || !(floor ? IsFloor(stack.ItemId) : IsWallpaper(stack.ItemId)))
+        if (stack is null || !(floor ? IsFloor(stack.ItemId) : IsWallpaper(stack.ItemId)))
             return ValueTask.CompletedTask;
+        if (BagLocks.LockedBy(session, stack.Slot) is { } locked)
+        {
+            logger.LogWarning("[{Session}] {Name}: {Kind} from bag slot {Slot}: it is {Why}", session.Id, c.Name, floor ? "floor" : "wallpaper",
+                stack.Slot, locked);
+            return ValueTask.CompletedTask;
+        }
         var old = floor ? c.HouseFloor : c.HouseWall;
         var plain = floor ? old is 0 or DefaultFloor : old is 0 or DefaultWall;
         if (old == stack.ItemId)

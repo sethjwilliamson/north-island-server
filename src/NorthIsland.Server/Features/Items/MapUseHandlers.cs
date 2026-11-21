@@ -91,17 +91,31 @@ public sealed class MapUseHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Uses the first stack of an item in the bag on the target: restores its HP and SP and takes one.</summary>
+    /// <summary>
+    /// The farthest a heal may reach another player or their pet on each axis, in pixels: the client sets no reach for a map heal, so this is
+    /// its pick-up reach.
+    /// </summary>
+    private const int CastReach = 170;
+
+    /// <summary>
+    /// Uses the first stack of an item in the bag that is not committed elsewhere (see <see cref="BagLocks"/>) on the target: restores its HP and SP
+    /// and takes one. A quest pet is not fed.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="character">The player's character.</param>
     /// <param name="itemId">The item id.</param>
     /// <param name="target">Who the item is used on.</param>
     private void UseItem(GameSession session, Character character, ushort itemId, Target target)
     {
-        var stack = character.Bag.Where(b => b.ItemId == itemId).OrderBy(b => b.Slot).FirstOrDefault();
+        var stack = character.Bag.Where(b => b.ItemId == itemId && !BagLocks.IsLocked(session, b.Slot)).OrderBy(b => b.Slot).FirstOrDefault();
         if (stack is null || items[itemId] is not { Restores.Count: > 0 } item)
         {
-            logger.LogWarning("[{Session}] hotkey item {Item}: not in the bag or no known effect", session.Id, itemId);
+            logger.LogWarning("[{Session}] hotkey item {Item}: not in the bag (or only committed elsewhere) or no known effect", session.Id, itemId);
+            return;
+        }
+        if (target.Pet is { Tradable: 0 })
+        {
+            logger.LogWarning("[{Session}] hotkey item {Item} on pet {Pet}: a quest NPC", session.Id, itemId, target.Name);
             return;
         }
         var hp = item.Restores.Where(r => r.Attr == Action8.AttrHp).Sum(r => r.Amount);
@@ -143,6 +157,11 @@ public sealed class MapUseHandlers(
                 character.Name, skillId, knows, skill?.Type, casterSp);
             return;
         }
+        if (OutOfReach(session, character, target) is { } far)
+        {
+            logger.LogWarning("[{Session}] {Name}: cannot cast {Skill} on {Target}: {Why}", session.Id, character.Name, skillId, target.Name, far);
+            return;
+        }
         var amount = Math.Max(1, skill.Power + 2 * (pet?.Intelligence ?? character.Intelligence) + 2 * (pet?.Level ?? character.Level));
         if (pet is not null)
         {
@@ -162,6 +181,24 @@ public sealed class MapUseHandlers(
             skill.Name,
             target.Name,
             amount);
+    }
+
+    /// <summary>
+    /// Tells why a heal cannot reach another player or their pet: not on the caster's map, farther than <see cref="CastReach"/>, or in a battle.
+    /// </summary>
+    /// <param name="session">The caster's session.</param>
+    /// <param name="character">The caster's character.</param>
+    /// <param name="target">Who is healed.</param>
+    /// <returns>The reason for the log, or null when the target is the caster's own or within reach.</returns>
+    private static string? OutOfReach(GameSession session, Character character, Target target)
+    {
+        if (ReferenceEquals(target.Session, session))
+            return null;
+        if (target.Session.ActiveCharacter is not { } other || other.MapId != character.MapId)
+            return "not on the same map";
+        if (Math.Abs(other.X - character.X) > CastReach || Math.Abs(other.Y - character.Y) > CastReach)
+            return $"too far away at ({other.X}, {other.Y}), the caster is at ({character.X}, {character.Y})";
+        return target.Session.Battle is not null ? "in a battle" : null;
     }
 
     /// <summary>Adds HP and SP to the target up to its maximum and sends the new values.</summary>

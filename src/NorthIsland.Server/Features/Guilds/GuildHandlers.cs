@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NorthIsland.Protocol.Messages.Player;
@@ -11,15 +12,20 @@ namespace NorthIsland.Server.Features.Guilds;
 /// <param name="guilds">The guild registry.</param>
 /// <param name="world">The world state, to find sessions.</param>
 /// <param name="castles">The castle registry; the Trojan War blocks some requests.</param>
+/// <param name="boards">The notice boards, whose guild board goes with a removed guild.</param>
 /// <param name="options">The guild options.</param>
 /// <param name="logger">The logger.</param>
 public sealed class GuildHandlers(
     GuildRegistry guilds,
     WorldState world,
     CastleRegistry castles,
+    BoardRegistry boards,
     IOptions<GuildFeatureOptions> options,
     ILogger<GuildHandlers> logger)
 {
+    /// <summary>When each guild last uploaded a badge (UTC), by guild id.</summary>
+    private readonly ConcurrentDictionary<uint, DateTime> _badgeUploads = new();
+
     /// <summary>The longest guild name, in characters.</summary>
     public const int MaxNameLength = 14;
 
@@ -61,7 +67,7 @@ public sealed class GuildHandlers(
 
     /// <summary>
     /// Handles <c>39/18</c>: a member with the right changes the guild badge; the guild's members get their own badge and everybody else the new
-    /// image.
+    /// image. A guild may upload once per <see cref="GuildOptions.BadgeUploadSeconds"/>.
     /// </summary>
     /// <param name="session">The sender's session.</param>
     /// <param name="body">The badge image bytes.</param>
@@ -75,6 +81,15 @@ public sealed class GuildHandlers(
             logger.LogWarning("[{Session}] {Name}: guild badge upload refused ({Length} bytes)", session.Id, character.Name, body.Length);
             return ValueTask.CompletedTask;
         }
+        var now = GameClock.UtcNow;
+        var wait = TimeSpan.FromSeconds(options.Value.Guilds.BadgeUploadSeconds);
+        if (_badgeUploads.TryGetValue(guild.Id, out var last) && now - last < wait)
+        {
+            logger.LogWarning("[{Session}] {Name}: guild badge upload refused, guild '{Guild}' uploaded one {Seconds:0} s ago", session.Id,
+                character.Name, guild.Name, (now - last).TotalSeconds);
+            return ValueTask.CompletedTask;
+        }
+        _badgeUploads[guild.Id] = now;
         var version = guilds.SetBadge(guild, body.ToArray());
         var members = Online(guild).ToList();
         foreach (var s in members)
@@ -176,7 +191,8 @@ public sealed class GuildHandlers(
     }
 
     /// <summary>
-    /// Handles <c>39/1</c>: founds a guild when the name, level, gold, guild limit and name checks pass, and answers with a result code.
+    /// Handles <c>39/1</c>: founds a guild when the name, level, gold, guild limit and name checks pass, and answers with a result code. The
+    /// membership, limit and name checks run in the registry together with the founding. Notices left on the new id's board are deleted.
     /// </summary>
     /// <param name="session">The founder's session.</param>
     /// <param name="body">The guild name.</param>
@@ -188,22 +204,21 @@ public sealed class GuildHandlers(
             return ValueTask.CompletedTask;
         var id = session.Account!.LoginId;
         var name = GameEncoding.GetString(body.Span).Trim();
-        var cap = options.Value.Guilds.MaxGuilds;
-        byte result = name.Length is 0 or > MaxNameLength ? (byte)1
-            : guilds.Of(id) is not null ? (byte)3 // result
-                : character.Level < FoundingLevel || character.Gold < FoundingCost ? (byte)2 // result
-                    : cap > 0 && guilds.Count >= cap ? (byte)4 // result
-                        : guilds.NameTaken(name) ? (byte)5 // result
-                            : (byte)0;
+        Guild? guild = null;
+        byte result = name.Length is 0 or > MaxNameLength ? (byte)1 // result: bad name
+            : character.Level < FoundingLevel || character.Gold < FoundingCost ? (byte)2 // result: level or gold too low
+                : (byte)0;
+        if (result == 0)
+            (guild, result) = guilds.Create(name, character, id, options.Value.Guilds.MaxGuilds);
         session.Send(GuildMessages.CreateResult(result));
-        if (result != 0)
+        if (guild is null)
         {
             logger.LogInformation("[{Session}] {Name}: guild '{Guild}' refused ({Result})", session.Id, character.Name, name, result);
             return ValueTask.CompletedTask;
         }
         character.Gold -= FoundingCost;
         session.Send(PlayerMessages.MoneyChange(-FoundingCost));
-        var guild = guilds.Create(name, character, id);
+        boards.RemoveBoard(guild.Id);
         session.Send(Info(guild));
         SendTag(session, guild);
         logger.LogInformation("[{Session}] {Name} founds guild '{Guild}' ({Id})", session.Id, character.Name, guild.Name, guild.Id);
@@ -241,7 +256,10 @@ public sealed class GuildHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Handles <c>39/3</c>: the answer of an invited player; on yes they join the guild and the inviter and the guild are told.</summary>
+    /// <summary>
+    /// Handles <c>39/3</c>: the answer of an invited player; on yes they join the guild, if it still has room and they are in no guild (checked
+    /// under the registry's lock), and the inviter and the guild are told.
+    /// </summary>
     /// <param name="session">The invited player's session.</param>
     /// <param name="body">The inviter's id and the answer byte.</param>
     internal ValueTask OnAnswer(GameSession session, ReadOnlyMemory<byte> body)
@@ -258,16 +276,13 @@ public sealed class GuildHandlers(
         session.GuildOffers.InvitedBy = 0;
         var inviter = world.SessionOf(inviterId)!;
         var guild = guilds.Of(inviterId);
-        if (answer != 1 || guild is null || guilds.Of(id) is not null || guild.Members.Count >= Guild.MaxMembers)
+        var member = new GuildMember { Id = id };
+        member.Refresh(character);
+        if (answer != 1 || guild is null || !guilds.TryJoin(guild, member))
         {
             inviter?.Send(GuildMessages.InviteResult(id, answer == 1 ? (byte)4 : answer)); // result
             return ValueTask.CompletedTask;
         }
-        var member = new GuildMember { Id = id };
-        member.Refresh(character);
-        lock (guilds.Lock)
-            guild.Members.Add(member);
-        guilds.Save();
         inviter?.Send(GuildMessages.InviteResult(id, 1));
         foreach (var other in Online(guild).Where(s => s != session))
             other.Send(GuildMessages.MemberJoined(id));
@@ -364,12 +379,17 @@ public sealed class GuildHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Removes a guild: its online members are told and lose their tag, and the castle loses its owner if this guild owned it.</summary>
+    /// <summary>
+    /// Removes a guild: its online members are told and lose their tag, its board's notices are deleted, its badge wait is forgotten, and the castle
+    /// loses its owner if this guild owned it.
+    /// </summary>
     /// <param name="guild">The guild to remove.</param>
     private void Dissolve(Guild guild)
     {
         var online = Online(guild).ToList();
         guilds.Remove(guild);
+        boards.RemoveBoard(guild.Id);
+        _badgeUploads.TryRemove(guild.Id, out _);
         if (castles.GuildGone(guild.Id) is { } noOwner)
         {
             var silent = castles.OwnerPacket();

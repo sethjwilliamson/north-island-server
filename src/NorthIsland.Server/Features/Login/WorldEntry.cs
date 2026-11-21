@@ -13,6 +13,7 @@ namespace NorthIsland.Server.Features.Login;
 /// <summary>Prepares a character and sends the client everything it needs when the character enters the world.</summary>
 /// <param name="store">Account storage; the account is saved on entry.</param>
 /// <param name="world">The world state the session joins.</param>
+/// <param name="sessions">The live session of each account; only that session may enter.</param>
 /// <param name="itemHandlers">Starter kit and inventory sending.</param>
 /// <param name="itemData">Item definitions.</param>
 /// <param name="friends">Friend list handlers, which send their login packets.</param>
@@ -41,6 +42,7 @@ namespace NorthIsland.Server.Features.Login;
 public sealed class WorldEntry(
     IAccountStore store,
     WorldState world,
+    AccountSessions sessions,
     ItemHandlers itemHandlers,
     ItemData itemData,
     FriendHandlers friends,
@@ -70,12 +72,16 @@ public sealed class WorldEntry(
     /// <summary>
     /// Puts the character into the world: applies pending fixes (starting attributes, owed points, weekly reset, return from an event arena), saves
     /// the account, sends the own record, attributes, pets, inventory, options, marks and every feature's login packets, then joins the world.
+    /// A session that no longer holds its account, or whose account is in the world on another session, is kicked instead, before and again
+    /// just before it joins (the save in between lets another login run).
     /// </summary>
     /// <param name="session">The session of the player.</param>
     /// <param name="character">The character that enters.</param>
     internal async Task EnterWorldAsync(GameSession session, Character character)
     {
         var account = session.Account!;
+        if (!MayEnter(session, account))
+            return;
         session.ActiveCharacter = character;
         itemHandlers.EnsureStarterKit(character);
         events.TakePendingRole(session, character);
@@ -194,6 +200,11 @@ public sealed class WorldEntry(
 
         session.Send(new PacketWriter(Action20.Code, Action20.Finished).ToArray());
 
+        if (!MayEnter(session, account))
+        {
+            session.ActiveCharacter = null; // the live session of the account owns the character and its save
+            return;
+        }
         world.Enter(session);
 
         friends.SendOnLogin(session, character);
@@ -223,6 +234,25 @@ public sealed class WorldEntry(
         wander.SendPositions(session);
         events.EnterMap(session);
         instances.SendOnLogin(session);
+    }
+
+    /// <summary>
+    /// Whether a session may join the world with its account: it is the account's live session and no other session of the account is in the
+    /// world. Kicks the session otherwise, so that a joining session never replaces a live one in the world.
+    /// </summary>
+    /// <param name="session">The session that enters.</param>
+    /// <param name="account">Its account.</param>
+    /// <returns>True when it may enter.</returns>
+    private bool MayEnter(GameSession session, Account account)
+    {
+        var inWorld = world.SessionOf(account.LoginId);
+        if (sessions.Holds(session) && (inWorld is null || ReferenceEquals(inWorld, session)))
+            return true;
+        logger.LogWarning("[{Session}] {Account} may not enter the world: {Reason}", session.Id, account.Name,
+            inWorld is null || ReferenceEquals(inWorld, session) ? "a later login took the account" : $"session {inWorld.Id} is in the world");
+        session.Send(ServerMessages.Kick(KickReason.RepeatedLogin));
+        session.Close();
+        return false;
     }
 
     /// <summary>

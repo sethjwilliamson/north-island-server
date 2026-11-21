@@ -97,7 +97,7 @@ public sealed class ItemTable
             RequiredLevel = B(r, 119),
             Price = I(r, 120),
             SellPrice = I(r, 124),
-            Unknown128 = B(r, 128),
+            UsableBy = B(r, 128),
             Flags = W(r, 129),
             Unknown131 = I(r, 131),
             Unknown135 = B(r, 135),
@@ -105,7 +105,7 @@ public sealed class ItemTable
             LinkedSkillId = W(r, 140),
             Words142 = Words(r, 142, 5),
             Description = ReversedShortString(r, 152, 254),
-            Bytes407 = Bytes(r, 407, 3),
+            FurnitureSize = Bytes(r, 407, 3), // record offsets 407 to 409: furniture size x, y, z
             Unknown410 = W(r, 410),
             CellWidth = B(r, 412),
             CellHeight = B(r, 413),

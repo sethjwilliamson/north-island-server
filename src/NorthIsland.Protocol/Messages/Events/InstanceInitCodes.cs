@@ -30,6 +30,9 @@ public static class InstanceInitCodes
     /// <summary>The player cannot be teleported.</summary>
     public const byte CannotTeleport = 8;
 
+    /// <summary>The player is too busy to be moved into the instance (the client shows "Players are too busy to transmit instance").</summary>
+    public const byte TooBusy = 9;
+
     /// <summary>The instance is closed.</summary>
     public const byte Closed = 11;
 

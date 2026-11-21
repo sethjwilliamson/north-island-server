@@ -31,11 +31,15 @@ public sealed class RebornWishHandlers(
         return [.. all.Where(n => n.GrowKey is >= 1 and <= 50 && !c.RebornWishes.Contains(n.Id)).OrderBy(n => n.GrowKey)];
     }
 
-    /// <summary>Opens the wish: sends the list of grow keys on offer and the choice screen.</summary>
+    /// <summary>
+    /// Opens the wish: remembers the map it was opened on, which the wish requires, and sends the list of grow keys on offer and the choice
+    /// screen.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     public void Open(GameSession session)
     {
         var c = session.ActiveCharacter!;
+        session.PetJobs.RebornWishMap = c.MapId;
         var offered = options.Value.RebornWish.Enabled ? Offered(c) : [];
         session.Send(RebornWishMessages.List([.. offered.Select(n => n.GrowKey)]));
         session.Send(RebornWishMessages.Choice());
@@ -43,8 +47,9 @@ public sealed class RebornWishHandlers(
     }
 
     /// <summary>
-    /// Grants a wish: takes the stars, gives the pet in a free slot and removes it from the list; refused when the pet is
-    /// not on offer, costs nothing, or the player lacks a slot or stars.
+    /// Grants a wish: takes the stars, gives the pet in a free slot and removes it from the list; refused when no NPC opened the wish on
+    /// this map (a wish closes it), in a battle, when the pet is not on offer, costs nothing, the player already has one of its kind (on the
+    /// team, in the storage or asleep in a bed), or lacks a slot or stars.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the pet's NPC id.</param>
@@ -52,8 +57,16 @@ public sealed class RebornWishHandlers(
     {
         if (session.State != SessionState.InWorld || session.ActiveCharacter is not { } c || body.Length < 2)
             return ValueTask.CompletedTask;
+        var openedOn = session.PetJobs.RebornWishMap;
+        session.PetJobs.RebornWishMap = null;
         var o = options.Value.RebornWish;
         var npcId = (ushort)(body.Span[0] | body.Span[1] << 8);
+        if (openedOn != c.MapId || session.Battle is not null)
+        {
+            logger.LogWarning("[{Session}] {Name}: reborn wish for {Npc} refused ({Why})", session.Id, c.Name, npcId,
+                openedOn != c.MapId ? "the wish is not open on this map" : "in a battle");
+            return ValueTask.CompletedTask;
+        }
         var pet = o.Enabled ? Offered(c).FirstOrDefault(n => n.Id == npcId) : null;
         if (pet is null)
         {
@@ -61,10 +74,10 @@ public sealed class RebornWishHandlers(
             return ValueTask.CompletedTask;
         }
         var cost = RebornWish.Cost(pet.GrowKey, pet.Id, mark => marks.FlagBit(mark) != 0 && c.MarkFlags.Contains(mark));
-        if (cost == 0 || Pets.FreeSlot(c) == 0 || c.Pets.Exists(p => p.NpcId == pet.Id) || Bag.Count(c, o.StarItem) < cost)
+        if (cost == 0 || Pets.FreeSlot(c) == 0 || Pets.OwnsKind(c, pet.Id) || Bag.Count(c, o.StarItem) < cost)
         {
-            logger.LogInformation("[{Session}] {Name}: reborn wish for {Pet} refused ({Cost} stars, {Have} in the bag, {Pets} pets)", session.Id, c.Name,
-                pet.Name, cost, Bag.Count(c, o.StarItem), c.Pets.Count);
+            logger.LogWarning("[{Session}] {Name}: reborn wish for {Pet} refused ({Cost} stars, {Have} in the bag, {Pets} pets, same kind {Owned})",
+                session.Id, c.Name, pet.Name, cost, Bag.Count(c, o.StarItem), c.Pets.Count, Pets.OwnsKind(c, pet.Id));
             return ValueTask.CompletedTask;
         }
 

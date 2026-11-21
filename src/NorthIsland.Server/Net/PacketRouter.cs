@@ -9,6 +9,9 @@ namespace NorthIsland.Server.Net;
 public sealed class PacketRouter(
     ILogger<PacketRouter> logger)
 {
+    /// <summary>The most bytes of a bad packet written to the log as hex; the rest is only counted.</summary>
+    private const int MaxDumpBytes = 256;
+
     /// <summary>The handlers registered for an action and sub code, with their names.</summary>
     private readonly Dictionary<(byte Action, byte Sub), (PacketHandler Handler, string Name)> _bySub = [];
 
@@ -61,7 +64,7 @@ public sealed class PacketRouter(
         return this;
     }
 
-    /// <summary>Sends the clear packets of a route, if it has any.</summary>
+    /// <summary>Sends the clear packets of a route, if it has any; the log line counts against the session's bad-packet log budget.</summary>
     /// <param name="session">The player's session.</param>
     /// <param name="action">The action code.</param>
     /// <param name="sub">The sub code.</param>
@@ -76,19 +79,27 @@ public sealed class PacketRouter(
     {
         if (!_clears.TryGetValue((action, sub), out var c) && !_clears.TryGetValue((action, null), out c))
             return;
-        logger.LogInformation("[{Session}] {Name}: {Why}, sending the packet that frees the client", session.Id, name, why);
+        if (MayLog(session))
+            logger.LogInformation("[{Session}] {Name}: {Why}, sending the packet that frees the client", session.Id, name, why);
         foreach (var p in c.Clear())
             session.Send(p);
     }
 
-    /// <summary>Finds the handler of a packet and runs it, sending the clear packets when it fails, is malformed or stays silent.</summary>
+    /// <summary>
+    /// Finds the handler of a packet and runs it, sending the clear packets when it fails, is malformed or stays silent. Drops the packet of a
+    /// session that is closing, also when the close came while the packet waited for the session's gate. Under the gate, first runs the work
+    /// handed over to the session (<see cref="GameSession.HandOver"/>).
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="payload">The packet: action, sub code and body.</param>
     public async ValueTask DispatchAsync(GameSession session, byte[] payload)
     {
+        if (session.Closing)
+            return;
         if (payload.Length == 0)
         {
-            logger.LogWarning("[{Session}] empty payload", session.Id);
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] empty payload", session.Id);
             return;
         }
 
@@ -101,14 +112,18 @@ public sealed class PacketRouter(
             body = payload.AsMemory(1);
         else
         {
-            logger.LogWarning("[{Session}] unhandled {Action}/{Sub} in state {State} | {Hex}",
-                session.Id, action, payload.Length >= 2 ? payload[1].ToString(System.Globalization.CultureInfo.InvariantCulture) : "-", // Sub
-                session.State, Hex.Format(payload));
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] unhandled {Action}/{Sub} in state {State} | {Hex}",
+                    session.Id, action, payload.Length >= 2 ? payload[1].ToString(System.Globalization.CultureInfo.InvariantCulture) : "-", // Sub
+                    session.State, Dump(payload));
             return;
         }
 
         var sub = payload.Length >= 2 ? payload[1] : (byte)0;
         using var exclusive = await session.ExclusiveAsync().ConfigureAwait(false); // timers that change the bag wait for the packet to be handled
+        if (session.Closing)
+            return;
+        session.RunHandedOver(); // a battle's settlement handed over while the gate was busy comes before the packet
         var sent = session.BeginDispatch();
         try
         {
@@ -119,13 +134,27 @@ public sealed class PacketRouter(
         }
         catch (PacketFormatException ex)
         {
-            logger.LogWarning("[{Session}] malformed {Name}: {Message} | {Hex}", session.Id, route.Name, ex.Message, Hex.Format(payload));
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] malformed {Name}: {Message} | {Hex}", session.Id, route.Name, ex.Message, Dump(payload));
             SendClear(session, action, sub, route.Name, "malformed");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(ex, "[{Session}] handler {Name} failed | {Hex}", session.Id, route.Name, Hex.Format(payload));
+            if (MayLog(session))
+                logger.LogError(ex, "[{Session}] handler {Name} failed | {Hex}", session.Id, route.Name, Dump(payload));
             SendClear(session, action, sub, route.Name, "failed");
         }
     }
+
+    /// <summary>Takes a line from the session's budget of problem log lines, first logging how many lines the budget held back.</summary>
+    /// <param name="session">The session.</param>
+    /// <returns>True when the line may be logged.</returns>
+    private bool MayLog(GameSession session) => session.ProblemLog.TryTake(logger, session.Id);
+
+    /// <summary>Gives the hex of a bad packet for the log, cut after <see cref="MaxDumpBytes"/> bytes.</summary>
+    /// <param name="payload">The packet.</param>
+    /// <returns>The hex text, with the packet's length when it is cut.</returns>
+    private static string Dump(byte[] payload) => payload.Length <= MaxDumpBytes ? Hex.Format(payload)
+        : string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{Hex.Format(payload.AsSpan(0, MaxDumpBytes))} ... ({payload.Length} bytes)");
 }

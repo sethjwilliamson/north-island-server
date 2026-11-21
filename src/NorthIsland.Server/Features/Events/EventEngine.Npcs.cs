@@ -145,7 +145,7 @@ public sealed partial class EventEngine
         }
         if (character.Pets.Find(p => p.NpcId == npcId) is { } leaving)
         {
-            PetTradeHandlers.Give(world, session, character, leaving);
+            Pets.Exile(session, character, leaving, world, combat); // resends the combat stats when the owner rode it
             character.DepartedTeamNpcs.RemoveAll(p => p.NpcId == npcId);
             character.DepartedTeamNpcs.Add(leaving);
             logger.LogInformation("[{Session}] {Source}: {Pet} ({Npc}) leaves the team (level {Level} kept for a return)", session.Id, run.Source,

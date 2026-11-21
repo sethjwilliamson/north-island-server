@@ -21,17 +21,19 @@ public sealed class CareerHandlers(
     WorldState world,
     ILogger<CareerHandlers> logger)
 {
-    /// <summary>Sends the career form to the player.</summary>
+    /// <summary>Sends the career form to the player and remembers the map it was opened on, which the job choice requires.</summary>
     /// <param name="session">The player's session.</param>
     public void OpenForm(GameSession session)
     {
+        session.CareerForm.FormMap = session.ActiveCharacter!.MapId;
         session.Send(CareerMessages.ShowForm());
         logger.LogInformation("[{Session}] {Name}: career form (STR {Str}, INT {Int})", session.Id, session.ActiveCharacter!.Name,
             session.ActiveCharacter.Strength, session.ActiveCharacter.Intelligence);
     }
 
     /// <summary>
-    /// Handles the job choice in the career form (<c>79/1</c>): checks the rebirth rules and bag room, reborns the character, gives the manteau,
+    /// Handles the job choice in the career form (<c>79/1</c>): requires the form an NPC opened on this map (the choice closes it) and a
+    /// finished rebirth trial, refuses it in a battle, checks the rebirth rules and bag room, reborns the character, gives the manteau,
     /// clears the trial mark, and tells the player and the map.
     /// </summary>
     /// <param name="session">The player's session.</param>
@@ -41,9 +43,15 @@ public sealed class CareerHandlers(
         if (InWorld(session) is not { } c || body.Length < 1)
             return ValueTask.CompletedTask;
         var job = body.Span[0];
-        if (Career.RebirthRefusal(c, job) is { } why)
+        var formMap = session.CareerForm.FormMap;
+        session.CareerForm.FormMap = null;
+        var why = formMap != c.MapId ? "the career form is not open on this map"
+            : session.Battle is not null ? "in a battle"
+                : c.MarkCount(Career.TrialMark) < Career.TrialDone ? $"rebirth trial at step {c.MarkCount(Career.TrialMark)}, needs {Career.TrialDone}"
+                    : Career.RebirthRefusal(c, job);
+        if (why is not null)
         {
-            logger.LogInformation("[{Session}] {Name}: rebirth as job {Job} refused ({Why})", session.Id, c.Name, job, why);
+            logger.LogWarning("[{Session}] {Name}: rebirth as job {Job} refused ({Why})", session.Id, c.Name, job, why);
             return ValueTask.CompletedTask;
         }
         var manteau = Career.RebirthManteau(job, c.Level);

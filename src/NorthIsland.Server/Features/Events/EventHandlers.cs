@@ -15,13 +15,14 @@ public sealed class EventHandlers(
     ILogger<EventHandlers> logger)
 {
     /// <summary>
-    /// Hooks the engine into the world so a pending role change is applied when a player leaves their map, and keeps the place a player
-    /// came to Carnie from for the Carnie exit's warp.
+    /// Hooks the engine into the world so a pending role change is applied and the running event ends when a player leaves their map, and
+    /// keeps the place a player came to Carnie from for the Carnie exit's warp.
     /// </summary>
     internal void Start()
     {
         world.MapLeaving += engine.ApplyPendingRole;
         world.MapChanging += CarnieReturn.Remember;
+        world.MapChanging += engine.LeaveMap;
     }
 
     /// <summary>Passes the result of a minigame to the engine.</summary>

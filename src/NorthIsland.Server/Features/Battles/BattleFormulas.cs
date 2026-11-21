@@ -534,13 +534,14 @@ public static class BattleFormulas
     /// <param name="chancePercent">The chance in percent that anything drops.</param>
     /// <param name="rng">The random source.</param>
     /// <param name="rank">Gives the rank of an item id.</param>
+    /// <param name="maxGap">The most rank steps a weight halves for; see <see cref="DropWeight"/>.</param>
     /// <returns>The id of the dropped item, or null.</returns>
-    public static ushort? Drop(NpcRecord npc, int chancePercent, Random rng, Func<ushort, int> rank)
+    public static ushort? Drop(NpcRecord npc, int chancePercent, Random rng, Func<ushort, int> rank, int maxGap)
     {
         if (npc.Items.Count == 0 || rng.Next(100) >= chancePercent)
             return null;
         var top = npc.Items.Max(i => Math.Max(1, rank(i)));
-        var weights = npc.Items.Select(i => DropWeight(Math.Max(1, rank(i)), top)).ToArray();
+        var weights = npc.Items.Select(i => DropWeight(Math.Max(1, rank(i)), top, maxGap)).ToArray();
         var roll = rng.NextDouble() * weights.Sum();
         for (var i = 0; i < weights.Length; i++)
             if ((roll -= weights[i]) < 0)
@@ -576,8 +577,9 @@ public static class BattleFormulas
     /// <summary>The weight of a drop slot in the drop roll.</summary>
     /// <param name="rank">The item's rank.</param>
     /// <param name="top">The highest rank on the monster's list.</param>
-    /// <returns>Two to the power of the rank's distance below the top.</returns>
-    public static double DropWeight(int rank, int top) => Math.Pow(2, Math.Max(0, top - rank));
+    /// <param name="maxGap">The largest distance counted; 0 or less gives every slot the same weight.</param>
+    /// <returns>Two to the power of the rank's distance below the top, the distance capped at <paramref name="maxGap"/>.</returns>
+    public static double DropWeight(int rank, int top, int maxGap) => Math.Pow(2, Math.Clamp(top - rank, 0, Math.Max(0, maxGap)));
 
     /// <summary>Rolls the damage of a magic damage skill.</summary>
     /// <param name="attacker">The casting fighter.</param>

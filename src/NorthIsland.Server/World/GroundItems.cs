@@ -82,33 +82,29 @@ public sealed class GroundItems(
             ];
     }
 
-    /// <summary>Looks at the thing at an index on the player's map without taking it.</summary>
-    /// <param name="session">The player's session.</param>
-    /// <param name="index">The ground index.</param>
-    /// <returns>The thing, or null when the index is empty or invalid.</returns>
-    public GroundThing? Peek(GameSession session, ushort index)
-    {
-        var ground = Ground(session.ActiveCharacter!.MapId);
-        lock (ground)
-            return index is >= 1 and <= MaxIndex ? ground.Slots[index]?.Thing : null;
-    }
-
     /// <summary>
-    /// Takes the thing at an index off the player's map: frees the index, queues a map thing to come back, and tells the
-    /// map to remove it.
+    /// Takes the thing at an index off the player's map when a check accepts it: frees the index, queues a map thing to come back, and tells the
+    /// map to remove it. The check runs under the map's lock on the very thing that is then taken, so a thing dropped into the freed index in
+    /// between cannot be taken in its place. The check must be quick and must not take other locks.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="index">The ground index.</param>
-    /// <returns>The thing, or null when the index is empty or invalid.</returns>
-    public GroundThing? Take(GameSession session, ushort index)
+    /// <param name="refusal">Gets the thing and its x and y position and returns why it may not be taken, or null to take it.</param>
+    /// <param name="refused">The reason the check gave, or null when the thing was taken or the index is empty.</param>
+    /// <returns>The thing taken, or null when the index is empty or invalid or the check refused it.</returns>
+    public GroundThing? TakeIf(GameSession session, ushort index, Func<GroundThing, ushort, ushort, string?> refusal, out string? refused)
     {
         var mapId = session.ActiveCharacter!.MapId;
         var ground = Ground(mapId);
         Slot? slot;
+        refused = null;
         lock (ground)
         {
             slot = index is >= 1 and <= MaxIndex ? ground.Slots[index] : null;
             if (slot is null)
+                return null;
+            refused = refusal(slot.Thing, slot.X, slot.Y);
+            if (refused is not null)
                 return null;
             ground.Slots[index] = null;
             if (slot.Respawns)

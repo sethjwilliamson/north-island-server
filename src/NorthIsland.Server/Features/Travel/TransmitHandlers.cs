@@ -7,20 +7,21 @@ namespace NorthIsland.Server.Features.Travel;
 
 /// <summary>Serves the trips of the village robot, the submarine and the landing craft, ridden as vehicles.</summary>
 /// <param name="routes">The destinations of each vehicle kind.</param>
-/// <param name="maps">The map data.</param>
 /// <param name="world">The online sessions and maps.</param>
+/// <param name="travel">The teleport rule.</param>
 /// <param name="options">The vehicle options; they hold the fuel a trip costs.</param>
 /// <param name="logger">The logger.</param>
 public sealed class TransmitHandlers(
     TransmitRoutes routes,
-    MapData maps,
     WorldState world,
+    TravelRules travel,
     IOptions<VehicleFeatureOptions> options,
     ILogger<TransmitHandlers> logger)
 {
     /// <summary>
     /// Takes the player to the place they picked (<c>69</c>), using fuel when the options ask for it. Refused when they do not ride such a vehicle,
-    /// the place does not exist, or in a battle, at a stall, in an event or game.
+    /// the place does not exist, by the teleport rule (busy states, a map that cannot be left) and when the place is on a map no teleport may
+    /// reach; the sea is no bar here, as the submarine dives to it and surfaces from it.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: u8 place number, 1-based.</param>
@@ -36,11 +37,9 @@ public sealed class TransmitHandlers(
         var target = earth ? Earth(session, c) : routes.Route(kind, index);
         string? refusal = kind == 0 ? "not riding a robot, submarine or landing craft"
             : target is null ? $"no place {index} for kind {kind}"
-                : kind == 2 && (maps.SceneType(c.MapId) == 14) != (index == 1) ? "the submarine's pick does not fit the scene" // 2 submarine
-                    : session.Battle is not null ? "in a battle"
-                        : session.Stalls.Any ? "at a stall"
-                            : session.Event is not null || session.Minigame is not null ? "in an event or a game"
-                                : null;
+                : kind == 2 && travel.IsSea(c.MapId) != (index == 1) ? "the submarine's pick does not fit the scene" // 2 submarine
+                    : travel.LeaveRefusal(session, c)
+                        ?? (travel.IsBarred(target.MapId) ? $"map {target.MapId} cannot be reached this way" : null);
         if (refusal is not null)
         {
             logger.LogInformation("[{Session}] {Name}: trip {Index} refused: {Why}", session.Id, c.Name, index, refusal);

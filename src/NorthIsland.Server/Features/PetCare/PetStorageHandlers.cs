@@ -8,17 +8,25 @@ namespace NorthIsland.Server.Features.PetCare;
 /// <summary>Handles the pet storage of the inn: showing it and moving pets between the team and the storage.</summary>
 /// <param name="world">The world state, passed on when a pet leaves the player.</param>
 /// <param name="space">The space contract, which tells how many places the storage has.</param>
+/// <param name="combat">The combat stats, resent when the player gets off a pet that goes into the storage.</param>
+/// <param name="npcs">The npc data, which tells the soldiers (mercenaries) apart; they cannot be stored.</param>
 /// <param name="logger">The logger.</param>
 public sealed class PetStorageHandlers(
     WorldState world,
     SpaceContract space,
+    CombatStats combat,
+    NpcData npcs,
     ILogger<PetStorageHandlers> logger)
 {
-    /// <summary>Opens the storage for a player: sends its state and list, then the open message.</summary>
+    /// <summary>
+    /// Opens the storage for a player from an NPC's event: records it as open on the player's map (<see cref="OpenServices"/>), sends its state
+    /// and list, then the open message.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="character">The player's character.</param>
     public void Open(GameSession session, Character character)
     {
+        OpenServices.Open(session, character, ServiceWindow.PetStorage);
         SendState(session, character);
         session.Send(InnMessages.StorageOpen());
         logger.LogInformation("[{Session}] pet storage ({Count} stored)", session.Id, character.StoredPets.Count);
@@ -62,8 +70,9 @@ public sealed class PetStorageHandlers(
     }
 
     /// <summary>
-    /// Moves pets between the team and the storage in one step; the whole move is refused when any part breaks a rule
-    /// (an empty place, a ridden or stalled pet, a pet that cannot be stored, no room, or two pets of one kind on a side).
+    /// Moves pets between the team and the storage in one step; the whole move is refused when the storage is not open on the player's map (an
+    /// NPC or a Wit Maid opened it there, <see cref="OpenServices"/>) or a pet trade is open, or when any part breaks a rule (an empty place, a
+    /// ridden or stalled pet, a pet that cannot be stored or a soldier (mercenary), no room, or two pets of one kind on a side).
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="storeSlots">The team slots of the pets to store.</param>
@@ -76,14 +85,18 @@ public sealed class PetStorageHandlers(
         var toStore = storeSlots.Distinct().Select(s => character.Pets.Find(p => p.Slot == s)).ToList();
         var toTake = withdrawIdx.Distinct().Select(i => character.StoredPets.Find(p => p.Slot == i)).ToList();
 
-        string? refusal = toStore.Exists(p => p is null) || toTake.Exists(p => p is null) ? "an empty place"
-            : toStore.Exists(p => p!.Slot == session.RidingPetSlot) ? "rides that pet"
-                : toStore.Exists(p => session.Stalls.Pets?.Prices.ContainsKey(p!.Slot) == true) ? "that pet is in his stall"
-                    : toStore.Exists(p => p!.Tradable != 1) ? "that pet cannot be stored"
-                        : character.Pets.Count - toStore.Count + toTake.Count > Pet.MaxPets ? "too many pets"
-                            : toStore.Count > toTake.Count && character.StoredPets.Count - toTake.Count + toStore.Count > space.HotelSlots(character)
-                                ? "the storage is full"
-                                : null;
+        string? refusal = !OpenServices.IsOpen(session, character, ServiceWindow.PetStorage) ? "no pet storage open here"
+            : session.Trades.Pets is not null ? "a pet trade is open"
+                : toStore.Exists(p => p is null) || toTake.Exists(p => p is null) ? "an empty place"
+                    : toStore.Exists(p => p!.Slot == session.RidingPetSlot) ? "rides that pet"
+                        : toStore.Exists(p => session.Stalls.Pets?.Prices.ContainsKey(p!.Slot) == true) ? "that pet is in his stall"
+                            : toStore.Exists(p => p!.Tradable != 1) ? "that pet cannot be stored"
+                                : toStore.Exists(p => npcs[p!.NpcId] is { IsMercenary: true }) ? "soldiers cannot be stored"
+                                    : character.Pets.Count - toStore.Count + toTake.Count > Pet.MaxPets ? "too many pets"
+                                        : toStore.Count > toTake.Count
+                                          && character.StoredPets.Count - toTake.Count + toStore.Count > space.HotelSlots(character)
+                                            ? "the storage is full"
+                                            : null;
         var carried = character.Pets.Except(toStore).Concat(toTake).Select(p => p!.NpcId).ToList();
         var stored = character.StoredPets.Except(toTake).Concat(toStore).Select(p => p!.NpcId).ToList();
         if (refusal is null && carried.Distinct().Count() != carried.Count)
@@ -98,7 +111,7 @@ public sealed class PetStorageHandlers(
         }
         if (refusal is not null)
         {
-            logger.LogInformation("[{Session}] {Name}: pet storage refused ({Why})", session.Id, character.Name, refusal);
+            logger.LogWarning("[{Session}] {Name}: pet storage refused ({Why})", session.Id, character.Name, refusal);
             session.Send(InnMessages.StorageDone());
             return ValueTask.CompletedTask;
         }
@@ -117,7 +130,7 @@ public sealed class PetStorageHandlers(
         }
         foreach (var (pet, idx) in storedAt)
         {
-            PetTradeHandlers.Give(world, session, character, pet);
+            Pets.Exile(session, character, pet, world, combat);
             pet.Slot = idx;
             character.StoredPets.Add(pet);
         }

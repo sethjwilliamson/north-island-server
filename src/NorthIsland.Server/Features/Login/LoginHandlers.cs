@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using NorthIsland.GameData.Characters;
 using NorthIsland.Protocol;
 using NorthIsland.Protocol.IO;
 using NorthIsland.Protocol.Messages.Login;
@@ -14,10 +15,12 @@ namespace NorthIsland.Server.Features.Login;
 /// </summary>
 /// <param name="store">Account and character storage.</param>
 /// <param name="world">The world state, used to find and kick an earlier session of the same account.</param>
+/// <param name="sessions">The live session of each account, claimed at login.</param>
 /// <param name="itemHandlers">Gives a new character its starter kit.</param>
 /// <param name="formulas">Sets the initial values of a new character.</param>
 /// <param name="worldEntry">Sends the world-entry packets once a character is chosen.</param>
 /// <param name="bans">The account and address ban list checked at login.</param>
+/// <param name="throttle">Locks out and brakes logins after too many failures and limits the auto-registrations per address.</param>
 /// <param name="options">
 /// Server options: server id, accepted client versions, spawn point, auto-registration and what follows character creation.
 /// </param>
@@ -25,15 +28,41 @@ namespace NorthIsland.Server.Features.Login;
 public sealed partial class LoginHandlers(
     IAccountStore store,
     WorldState world,
+    AccountSessions sessions,
     ItemHandlers itemHandlers,
     FormulaData formulas,
     WorldEntry worldEntry,
     BanList bans,
+    LoginThrottle throttle,
     IOptions<ServerOptions> options,
     ILogger<LoginHandlers> logger)
 {
+    /// <summary>The first character slot of an account.</summary>
+    private const byte FirstSlot = 1;
+
+    /// <summary>The last character slot of an account (the client shows 2 slots).</summary>
+    private const byte LastSlot = 2;
+
+    /// <summary>The stat points a new character spends at creation (the client's wizard hands out exactly 5).</summary>
+    private const int CreationStatPoints = 5;
+
+    /// <summary>The highest element a new character can choose (the wizard offers elements 1..4).</summary>
+    private const byte LastElement = 4;
+
+    /// <summary>The largest colour code: nine colour digits, each 0..9.</summary>
+    private const int MaxColourCode = 999_999_999;
+
     /// <summary>The server options, read once at construction.</summary>
     private readonly ServerOptions _options = options.Value;
+
+    /// <summary>Held while a character name or an account slot is reserved or released.</summary>
+    private readonly Lock _creating = new();
+
+    /// <summary>The character names being created right now, ignoring case.</summary>
+    private readonly HashSet<string> _namesBeingCreated = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The (login id, slot) pairs that get a character right now.</summary>
+    private readonly HashSet<(int LoginId, byte Slot)> _slotsBeingFilled = [];
 
     /// <summary>Matches a valid account name: 4 to 14 letters or digits.</summary>
     /// <returns>The compiled expression.</returns>
@@ -64,7 +93,8 @@ public sealed partial class LoginHandlers(
             await store.SaveAsync(account).ConfigureAwait(false);
         }
         session.Send(new PacketWriter(Action35.Code, Action35.ChangeAccountPassword).U8(result).ToArray());
-        logger.LogInformation("[{Session}] {Name}: change account password -> {Result}", session.Id, account.Name, result);
+        if (MayLog(session))
+            logger.LogInformation("[{Session}] {Name}: change account password -> {Result}", session.Id, account.Name, result);
     }
 
     /// <summary>
@@ -86,7 +116,8 @@ public sealed partial class LoginHandlers(
             await store.SaveAsync(account).ConfigureAwait(false);
         }
         session.Send(new PacketWriter(Action35.Code, Action35.ChangePassword).U8(result).ToArray());
-        logger.LogInformation("[{Session}] {Name}: change secret code -> {Result}", session.Id, character.Name, result);
+        if (MayLog(session))
+            logger.LogInformation("[{Session}] {Name}: change secret code -> {Result}", session.Id, character.Name, result);
     }
 
     /// <summary>
@@ -99,7 +130,8 @@ public sealed partial class LoginHandlers(
     {
         if (session.State != SessionState.Connected)
         {
-            logger.LogInformation("[{Session}] action 0 in state {State} (kick acknowledge)", session.Id, session.State);
+            if (MayLog(session))
+                logger.LogInformation("[{Session}] action 0 in state {State} (kick acknowledge)", session.Id, session.State);
             return ValueTask.CompletedTask;
         }
 
@@ -128,8 +160,12 @@ public sealed partial class LoginHandlers(
     }
 
     /// <summary>
-    /// Runs a login: checks the client version, the Item.Dat size, the name format and the bans, verifies the password (creating the account when
-    /// auto-registration is on), kicks an earlier session of the account, then sends the login id and the character list.
+    /// Runs a login: checks the client version, the Item.Dat size, the name format, the bans and the lockouts, waits out the name's brake when it
+    /// failed too often from all addresses (<see cref="LoginThrottle.BrakeMs"/>), verifies the password (creating
+    /// the account when auto-registration is on, the name is not a GmAccounts name and the address has registrations left), claims the account for
+    /// the session and kicks its earlier session (in the world or at character select), clears the admin mode, makes a GmAccounts name a GM, then
+    /// sends the login id and the character list. A wrong password or an unknown name counts towards the lockouts, and a connection whose logins
+    /// fail too often is closed.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="name">The account name.</param>
@@ -145,12 +181,16 @@ public sealed partial class LoginHandlers(
     {
         if (session.State != SessionState.AwaitLogin)
         {
-            logger.LogWarning("[{Session}] login in state {State}, ignored", session.Id, session.State);
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] login in state {State}, ignored", session.Id, session.State);
             return;
         }
 
-        logger.LogInformation("[{Session}] login '{Name}' version {Version} Item.Dat size {ItemDat}",
-            session.Id, name, version, itemDatSize?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "(none)");
+        if (MayLog(session))
+        {
+            logger.LogInformation("[{Session}] login '{Name}' version {Version} Item.Dat size {ItemDat}",
+                session.Id, name, version, itemDatSize?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "(none)");
+        }
 
         if (!_options.AcceptsClientVersion(version))
         {
@@ -165,39 +205,76 @@ public sealed partial class LoginHandlers(
         }
         if (!AccountNamePattern().IsMatch(name) || password.Length == 0)
         {
-            session.Send(ServerMessages.LoginRejected(Action1.WrongAccountOrPassword));
+            Refuse(session, ServerMessages.LoginRejected(Action1.WrongAccountOrPassword));
             return;
         }
-        if (bans.IsAccountBanned(name) || bans.IsAddressBanned(session.RemoteEndPoint?.Address))
+        var address = session.RemoteEndPoint?.Address;
+        if (bans.IsAccountBanned(name) || bans.IsAddressBanned(address))
         {
-            logger.LogWarning("[{Session}] login '{Name}' from {Address} refused: banned", session.Id, name, session.RemoteEndPoint?.Address);
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] login '{Name}' from {Address} refused: banned", session.Id, name, address);
             session.Send(ServerMessages.Locked(account: true, GmCommands.BanSeconds));
             return;
         }
+        if (throttle.LockedSeconds(name, address) is var locked and > 0)
+        {
+            if (MayLog(session))
+            {
+                logger.LogWarning("[{Session}] login '{Name}' from {Address} refused: locked out for {Seconds} s after failed logins",
+                    session.Id, name, address, locked);
+            }
+            Refuse(session, ServerMessages.Locked(account: true, locked));
+            return;
+        }
+        if (throttle.BrakeMs(name) is var brake and > 0)
+        {
+            await Task.Delay(brake).ConfigureAwait(false);
+            if (session.Closing)
+                return;
+        }
 
         var account = await store.FindByNameAsync(name).ConfigureAwait(false);
+        var created = false;
         if (account is null)
         {
-            if (!_options.AutoRegister)
+            if (!_options.AutoRegister || _options.ListsGm(name))
             {
-                session.Send(ServerMessages.LoginRejected(Action1.WrongAccountOrPassword));
+                if (_options.AutoRegister && MayLog(session))
+                    logger.LogWarning("[{Session}] login '{Name}' refused: a GmAccounts name is never registered by a login", session.Id, name);
+                Failed(session, name, address);
                 return;
             }
-            account = await store.CreateAsync(name, password).ConfigureAwait(false);
+            if (!throttle.TryRegister(address))
+            {
+                if (MayLog(session))
+                {
+                    logger.LogWarning("[{Session}] login '{Name}' from {Address} refused: the address registered its accounts for this hour",
+                        session.Id, name, address);
+                }
+                Refuse(session, ServerMessages.LoginRejected(Action1.WrongAccountOrPassword));
+                return;
+            }
+            try
+            {
+                account = await store.CreateAsync(name, password).ConfigureAwait(false);
+                created = true;
+            }
+            catch (InvalidOperationException) // another login registered the name first: check the password against that account
+            {
+                account = await store.FindByNameAsync(name).ConfigureAwait(false);
+            }
         }
-        else if (!PasswordHasher.Verify(password, account.PasswordHash))
+        if (account is null || (!created && !PasswordHasher.Verify(password, account.PasswordHash)))
         {
-            session.Send(ServerMessages.LoginRejected(Action1.WrongAccountOrPassword));
+            Failed(session, name, address);
             return;
         }
 
-        if (world.SessionOf(account.LoginId) is { } previous)
-        {
-            logger.LogInformation("[{Session}] {Name} logged in again, kicking session {Previous}", session.Id, name, previous.Id);
-            previous.Send(ServerMessages.Kick(KickReason.RepeatedLogin));
-            previous.Close();
-            world.Leave(previous);
-        }
+        throttle.Succeeded(name, address);
+        session.Login.FailedLogins = 0;
+        session.Account = account;
+        session.AdminMode = false;
+        KickEarlierSessions(session, account);
 
         account.LastLoginUtc = GameClock.UtcNow;
         if (!account.Gm && _options.ListsGm(account.Name))
@@ -206,11 +283,83 @@ public sealed partial class LoginHandlers(
             logger.LogInformation("[{Session}] {Name} is made a GM by the GmAccounts setting", session.Id, account.Name);
         }
         await store.SaveAsync(account).ConfigureAwait(false);
-        session.Account = account;
 
         session.Send(ServerMessages.LoginId(account.LoginId));
         SendCharacterList(session);
     }
+
+    /// <summary>Counts a wrong password or an unknown account name towards the lockouts and refuses the login.</summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="name">The account name.</param>
+    /// <param name="address">The client address, or null when it is not known.</param>
+    private void Failed(GameSession session, string name, System.Net.IPAddress? address)
+    {
+        throttle.Failed(name, address);
+        if (MayLog(session))
+            logger.LogWarning("[{Session}] login '{Name}' from {Address} refused: wrong account or password", session.Id, name, address);
+        Refuse(session, ServerMessages.LoginRejected(Action1.WrongAccountOrPassword));
+    }
+
+    /// <summary>
+    /// Sends the refusal of a login and counts it for the connection; once the connection reaches the failures per connection, it is told that
+    /// the login failed too often and closed.
+    /// </summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="refusal">The refusal packet.</param>
+    private void Refuse(GameSession session, byte[] refusal)
+    {
+        session.Send(refusal);
+        if (++session.Login.FailedLogins < Math.Max(1, _options.LoginFailuresPerConnection))
+            return;
+        if (MayLog(session))
+            logger.LogWarning("[{Session}] {Count} failed logins on this connection; disconnected", session.Id, session.Login.FailedLogins);
+        session.Send(ServerMessages.Kick(KickReason.LoginFailedThreeTimes));
+        session.Close();
+    }
+
+    /// <summary>
+    /// Makes a session the live session of its account and kicks the account's earlier session, whether it is in the world or still at character
+    /// select, and any other session of the account found in the world.
+    /// </summary>
+    /// <param name="session">The session that just logged in; its account is set.</param>
+    /// <param name="account">The account it logged in to.</param>
+    private void KickEarlierSessions(GameSession session, Account account)
+    {
+        var earlier = sessions.Claim(account, session);
+        foreach (var previous in new[] { earlier, world.SessionOf(account.LoginId) }.OfType<GameSession>().Distinct())
+        {
+            if (ReferenceEquals(previous, session))
+                continue;
+            if (MayLog(session))
+                logger.LogInformation("[{Session}] {Name} logged in again, kicking session {Previous}", session.Id, account.Name, previous.Id);
+            previous.Send(ServerMessages.Kick(KickReason.RepeatedLogin));
+            world.Disconnect(session, previous);
+        }
+    }
+
+    /// <summary>
+    /// Whether a session may still act on its account at character select: it is logged in and no later login of the account replaced it. Logs
+    /// the refusal otherwise.
+    /// </summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="what">The packet, for the log.</param>
+    /// <returns>True when the session holds its account.</returns>
+    private bool HoldsAccount(GameSession session, string what)
+    {
+        if (sessions.Holds(session))
+            return true;
+        if (MayLog(session))
+            logger.LogWarning("[{Session}] {What} from a session that no longer holds its account, ignored", session.Id, what);
+        return false;
+    }
+
+    /// <summary>
+    /// Takes a line from the session's budget of problem log lines (<see cref="GameSession.ProblemLog"/>), so that a client repeating a refused or
+    /// ignored packet cannot flood the log; logs first how many lines the budget held back.
+    /// </summary>
+    /// <param name="session">The player's session.</param>
+    /// <returns>True when the line may be logged.</returns>
+    private bool MayLog(GameSession session) => session.ProblemLog.TryTake(logger, session.Id);
 
     /// <summary>Sends the account's characters ordered by slot and moves the session to character select.</summary>
     /// <param name="session">The player's session.</param>
@@ -230,11 +379,21 @@ public sealed partial class LoginHandlers(
     {
         if (session.State != SessionState.CharacterSelect || session.Account is null)
         {
-            logger.LogWarning("[{Session}] 63/2 in state {State}, ignored", session.Id, session.State);
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] 63/2 in state {State}, ignored", session.Id, session.State);
             return;
         }
+        if (!HoldsAccount(session, "63/2"))
+            return;
 
         var slot = SelectSlotRequest.Parse(body.Span).Slot;
+        if (slot is < FirstSlot or > LastSlot)
+        {
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] 63/2 for slot {Slot}, refused", session.Id, slot);
+            SendCharacterList(session);
+            return;
+        }
         session.Login.SelectedSlot = slot;
         var character = session.Account.CharacterInSlot(slot);
         if (character is null)
@@ -248,21 +407,41 @@ public sealed partial class LoginHandlers(
         await worldEntry.EnterWorldAsync(session, character).ConfigureAwait(false);
     }
 
-    /// <summary>Forgets the account and returns the session to the stage that waits for a login.</summary>
+    /// <summary>
+    /// Releases the session's claim on its account, forgets the account and the admin mode, and returns the session to the stage that waits for a
+    /// login, with a new login timeout; ignored once the session is in the world, which it leaves only by disconnecting.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body after the action and sub code.</param>
-    internal static ValueTask OnBackToLogin(GameSession session, ReadOnlyMemory<byte> body)
+    internal ValueTask OnBackToLogin(GameSession session, ReadOnlyMemory<byte> body)
     {
+        if (session.State is not (SessionState.AwaitLogin or SessionState.CharacterSelect or SessionState.Creating))
+        {
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] 63/0 in state {State}, ignored", session.Id, session.State);
+            return ValueTask.CompletedTask;
+        }
+        if (session.State != SessionState.AwaitLogin)
+            session.RestartLoginTimer();
+        sessions.Release(session);
         session.Account = null;
+        session.AdminMode = false;
+        session.Login.PendingName = null;
         session.State = SessionState.AwaitLogin;
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Drops the pending character name and returns the session to character select.</summary>
+    /// <summary>Drops the pending character name and returns the session to character select; ignored outside character creation.</summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body after the action and sub code.</param>
-    internal static ValueTask OnCancelCreation(GameSession session, ReadOnlyMemory<byte> body)
+    internal ValueTask OnCancelCreation(GameSession session, ReadOnlyMemory<byte> body)
     {
+        if (session.State != SessionState.Creating)
+        {
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] 63/3 in state {State}, ignored", session.Id, session.State);
+            return ValueTask.CompletedTask;
+        }
         session.Login.PendingName = null;
         session.State = SessionState.CharacterSelect;
         return ValueTask.CompletedTask;
@@ -277,7 +456,8 @@ public sealed partial class LoginHandlers(
     {
         if (session.State != SessionState.Creating)
         {
-            logger.LogWarning("[{Session}] 9/2 in state {State}, ignored", session.Id, session.State);
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] 9/2 in state {State}, ignored", session.Id, session.State);
             return;
         }
 
@@ -296,31 +476,134 @@ public sealed partial class LoginHandlers(
 
     /// <summary>
     /// Creates the character in the selected slot from the pending name and the creation choices, then enters the world or resends the character
-    /// list, as configured; answers that the name is unavailable when the slot or the name was taken meanwhile.
+    /// list, as configured. Resends the character list when a choice is outside what the creation wizard offers, and answers that the name is
+    /// unavailable when the slot or the name was taken meanwhile (the name and the slot are reserved while the check and the add run, so two
+    /// sessions cannot both take them).
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body after the action and sub code.</param>
     internal async ValueTask OnCreateCharacter(GameSession session, ReadOnlyMemory<byte> body)
     {
-        if (session.State != SessionState.Creating || session.Account is null || session.Login.PendingName is null)
+        if (session.State != SessionState.Creating || session.Account is null || session.Login.PendingName is not { } name)
         {
-            logger.LogWarning("[{Session}] 9/1 in state {State} without an accepted name, ignored", session.Id, session.State);
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] 9/1 in state {State} without an accepted name, ignored", session.Id, session.State);
             return;
         }
+        if (!HoldsAccount(session, "9/1"))
+            return;
 
         var req = CreateCharacterRequest.Parse(body.Span);
         var account = session.Account;
-        if (account.CharacterInSlot(session.Login.SelectedSlot) is not null ||
-            await store.IsCharacterNameTakenAsync(session.Login.PendingName!).ConfigureAwait(false))
+        var slot = session.Login.SelectedSlot;
+        if (InvalidCreation(req, slot) is { } reason)
+        {
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] 9/1 refused: {Reason}", session.Id, reason);
+            session.Login.PendingName = null;
+            SendCharacterList(session);
+            return;
+        }
+
+        if (!TryReserve(name, account.LoginId, slot))
         {
             session.Send(ServerMessages.NameCheckResult(NameCheck.Unavailable));
             return;
         }
+        Character character;
+        try
+        {
+            if (account.CharacterInSlot(slot) is not null || await store.IsCharacterNameTakenAsync(name).ConfigureAwait(false))
+            {
+                session.Send(ServerMessages.NameCheckResult(NameCheck.Unavailable));
+                return;
+            }
+            character = NewCharacter(req, name, slot);
+            account.Characters.Add(character);
+            await store.SaveAsync(account).ConfigureAwait(false);
+        }
+        finally
+        {
+            Unreserve(name, account.LoginId, slot);
+        }
+        session.Login.PendingName = null;
+        if (MayLog(session)) // a client may create and delete characters at will
+        {
+            logger.LogInformation("[{Session}] created character '{Name}' in slot {Slot} for {Account}",
+                session.Id, character.Name, character.Slot, account.Name);
+        }
 
+        if (_options.AfterCreate == AfterCreate.EnterWorld)
+            await worldEntry.EnterWorldAsync(session, character).ConfigureAwait(false);
+        else
+            SendCharacterList(session);
+    }
+
+    /// <summary>
+    /// Checks the creation choices against what the creation wizard offers: a slot 1..2, a creatable body type and head, sprite 0, colour codes of
+    /// nine digits, an element 1..4 and stats that spend exactly the 5 creation points.
+    /// </summary>
+    /// <param name="req">The creation request.</param>
+    /// <param name="slot">The slot chosen on the character select screen.</param>
+    /// <returns>Why the choices are refused, or null when they are valid.</returns>
+    private static string? InvalidCreation(CreateCharacterRequest req, byte slot)
+    {
+        if (slot is < FirstSlot or > LastSlot)
+            return $"slot {slot}";
+        if (RoleData.RoleIndex(req.BodyType, req.Head) == 0) // 0: not a creatable role
+            return $"body type {req.BodyType} with head {req.Head}";
+        if (req.Sprite != 0) // the wizard always sends body sprite 0
+            return $"sprite {req.Sprite}";
+        if (req.Colour1 is < 0 or > MaxColourCode || req.Colour2 is < 0 or > MaxColourCode)
+            return $"colour codes {req.Colour1}, {req.Colour2}";
+        if (req.Element is < 1 or > LastElement)
+            return $"element {req.Element}";
+        if (req.Stats.Sum(s => s) != CreationStatPoints) // bytes are never negative, so each stat is then 0..5 too
+            return $"stats {string.Join(',', req.Stats)}";
+        return null;
+    }
+
+    /// <summary>Reserves a character name and an account slot for a creation.</summary>
+    /// <param name="name">The character name.</param>
+    /// <param name="loginId">The account's login id.</param>
+    /// <param name="slot">The slot.</param>
+    /// <returns>True when neither was reserved by another creation.</returns>
+    private bool TryReserve(string name, int loginId, byte slot)
+    {
+        lock (_creating)
+        {
+            if (_namesBeingCreated.Contains(name) || _slotsBeingFilled.Contains((loginId, slot)))
+                return false;
+            _namesBeingCreated.Add(name);
+            _slotsBeingFilled.Add((loginId, slot));
+            return true;
+        }
+    }
+
+    /// <summary>Releases the reservation of a creation.</summary>
+    /// <param name="name">The character name.</param>
+    /// <param name="loginId">The account's login id.</param>
+    /// <param name="slot">The slot.</param>
+    private void Unreserve(string name, int loginId, byte slot)
+    {
+        lock (_creating)
+        {
+            _namesBeingCreated.Remove(name);
+            _slotsBeingFilled.Remove((loginId, slot));
+        }
+    }
+
+    /// <summary>Builds a new character from the creation choices, with its starting attributes, initial values and starter kit.</summary>
+    /// <param name="req">The creation request.</param>
+    /// <param name="name">The accepted name.</param>
+    /// <param name="slot">The slot it goes into.</param>
+    /// <returns>The character.</returns>
+    private Character NewCharacter(CreateCharacterRequest req, string name, byte slot)
+    {
         var character = new Character
         {
-            Slot = session.Login.SelectedSlot,
-            Name = session.Login.PendingName!,
+            Slot = slot,
+            Name = name,
             CreatedUtc = GameClock.UtcNow,
             BodyType = req.BodyType,
             Head = req.Head,
@@ -337,21 +620,12 @@ public sealed partial class LoginHandlers(
         worldEntry.ApplyStartingAttributes(character);
         formulas.InitialiseNew(character);
         itemHandlers.EnsureStarterKit(character);
-        account.Characters.Add(character);
-        await store.SaveAsync(account).ConfigureAwait(false);
-        session.Login.PendingName = null;
-        logger.LogInformation("[{Session}] created character '{Name}' in slot {Slot} for {Account}",
-            session.Id, character.Name, character.Slot, account.Name);
-
-        if (_options.AfterCreate == AfterCreate.EnterWorld)
-            await worldEntry.EnterWorldAsync(session, character).ConfigureAwait(false);
-        else
-            SendCharacterList(session);
+        return character;
     }
 
     /// <summary>
-    /// Deletes the character in the requested slot and answers with a result: 1 deleted, 3 wrong secret code, 4 not possible now or no such
-    /// character.
+    /// Deletes the character in the requested slot and answers with a result: 1 deleted, 3 wrong secret code, 4 not possible now (not at
+    /// character select, the account was taken over by a later login, or the character is in the world) or no such character.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body after the action and sub code.</param>
@@ -361,8 +635,14 @@ public sealed partial class LoginHandlers(
         var account = session.Account;
         var character = account?.CharacterInSlot(req.Slot);
         byte result;
-        if (session.State != SessionState.CharacterSelect || account is null || character is null)
+        if (session.State != SessionState.CharacterSelect || account is null || character is null || !HoldsAccount(session, "35/2"))
             result = 4;
+        else if (world.SessionOf(account.LoginId)?.ActiveCharacter == character)
+        {
+            if (MayLog(session))
+                logger.LogWarning("[{Session}] 35/2 for {Name}, who is in the world, refused", session.Id, character.Name);
+            result = 4;
+        }
         else if (!string.IsNullOrEmpty(character.Cipher) && character.Cipher != req.Cipher)
             result = 3;
         else

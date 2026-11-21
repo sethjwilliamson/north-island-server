@@ -18,6 +18,7 @@ namespace NorthIsland.Server.Features.Instances;
 /// <param name="instances">The registry of the live instances.</param>
 /// <param name="marks">The mark data, used for the done-today flags.</param>
 /// <param name="guilds">The guild registry, used for guild-only instances.</param>
+/// <param name="travel">The teleport rule, for the maps and states that keep a player from entering the instance.</param>
 /// <param name="options">The instance options.</param>
 /// <param name="serverOptions">The server options; the spawn point is where players are sent out to.</param>
 /// <param name="logger">The logger.</param>
@@ -27,6 +28,7 @@ public sealed class InstanceHandlers(
     InstanceRegistry instances,
     MarkData marks,
     GuildRegistry guilds,
+    TravelRules travel,
     IOptions<InstanceOptions> options,
     IOptions<ServerOptions> serverOptions,
     ILogger<InstanceHandlers> logger) : IDisposable
@@ -351,7 +353,7 @@ public sealed class InstanceHandlers(
 
     /// <summary>
     /// Removes a member from an instance: tells them and sends them out when they stand on its map, tells the others, and ends the instance
-    /// when nobody is left.
+    /// when nobody is left, sending out anyone still standing on its map.
     /// </summary>
     /// <param name="instance">The instance.</param>
     /// <param name="playerId">The login id of the member to remove.</param>
@@ -381,8 +383,50 @@ public sealed class InstanceHandlers(
             instances.Remove(instance);
             if (instance.State == InstanceState.Waiting)
                 Broadcast(InstanceMessages.OrderClosed(2, instance.MapId)); // reason
+            SendOutStayers(instance);
             logger.LogInformation("Instance {Map} ({Title}) ended: no members", instance.MapId, instance.Scene.Name);
         }
+    }
+
+    /// <summary>
+    /// Sends out every player still standing on the map of an instance that has ended, members or not, so that nobody is left on the map copy
+    /// when it is handed to the next instance. A player in a battle stays until it ends (<see cref="AfterBattle"/>); one a leader's send-out
+    /// has already taken along is skipped.
+    /// </summary>
+    /// <param name="instance">The instance, already removed from the registry.</param>
+    private void SendOutStayers(Instance instance)
+    {
+        foreach (var session in world.OnMap(instance.MapId).ToList())
+        {
+            if (session.State != SessionState.InWorld || session.Account is null || session.ActiveCharacter is not { } character
+                || character.MapId != instance.MapId)
+                continue;
+            logger.LogInformation("[{Session}] {Name} is sent out of the ended instance {Map}", session.Id, character.Name, instance.MapId);
+            SendOut(session, character);
+        }
+    }
+
+    /// <summary>
+    /// Sends a player whose battle has ended out of an instance map copy they no longer belong on: its instance ended while they fought (a
+    /// player in a battle is not sent out with the others), or the copy was handed to an instance they are no member of.
+    /// </summary>
+    /// <param name="session">The player's session, out of the battle.</param>
+    public void AfterBattle(GameSession session)
+    {
+        if (session.Closing || session.LeavingGame || session.State != SessionState.InWorld || session.Account is null
+            || session.ActiveCharacter is not { } character || maps.InstanceOfMap(character.MapId) is null)
+            return;
+        if (instances.ByMap(character.MapId) is { } instance)
+        {
+            lock (instance.Lock)
+            {
+                if (instance.Member(Id(session)) is not null)
+                    return;
+            }
+        }
+        logger.LogInformation("[{Session}] {Name} is sent out of instance map {Map} after a battle: no member of a live instance there", session.Id,
+            character.Name, character.MapId);
+        SendOut(session, character);
     }
 
     /// <summary>Sends a player out of an instance map to the return point, leaving their team when team members are still in the instance.</summary>
@@ -402,13 +446,25 @@ public sealed class InstanceHandlers(
         world.ChangeMap(session, ReturnPoint(character));
     }
 
-    /// <summary>Handles pressing Enter (<c>85/9</c>): starts the instance if it is still waiting and moves the player to its entry point.</summary>
+    /// <summary>
+    /// Handles pressing Enter (<c>85/9</c>): starts the instance if it is still waiting and moves the player to its entry point. Refused, as the
+    /// client refuses it (Instances::enter, cannotTeleport), when the player is busy or rides a vehicle (too busy), or stands on a map no
+    /// teleport may leave (prison, maze, a house, another instance copy, Carnie, ...).
+    /// </summary>
     /// <param name="session">The player's session.</param>
     internal void Enter(GameSession session)
     {
         var character = session.ActiveCharacter!;
-        if (instances.Of(Id(session)) is not { } instance || session.Battle is not null || character.MapId == instance.MapId)
+        if (instances.Of(Id(session)) is not { } instance || character.MapId == instance.MapId)
             return;
+        var busy = TravelRules.BusyRefusal(session) ?? (session.Vehicle is { Riding: true } ? "riding a vehicle" : null);
+        var why = busy ?? (character.MapId == CarnieReturn.Carnie ? "Carnie cannot be left this way" : travel.LeaveRefusal(session, character));
+        if (why is not null)
+        {
+            logger.LogWarning("[{Session}] {Name}: entering instance {Map} refused: {Why}", session.Id, character.Name, instance.MapId, why);
+            session.Send(InstanceMessages.InitResult(busy is not null ? Codes.TooBusy : Codes.CannotTeleport));
+            return;
+        }
         lock (instance.Lock)
         {
             if (instance.ClosesUtc is not null)
@@ -418,7 +474,6 @@ public sealed class InstanceHandlers(
             }
         }
         Start(instance, GameClock.UtcNow);
-        session.Event = null;
         world.ChangeMap(session, new DoorWarp(instance.MapId, instance.Scene.EntryX, instance.Scene.EntryY, 0));
     }
 
@@ -536,7 +591,10 @@ public sealed class InstanceHandlers(
         return packets;
     }
 
-    /// <summary>Defines a goal of an instance, beating an npc a number of times, and sends it to the player.</summary>
+    /// <summary>
+    /// Defines a goal of an instance, beating an npc a number of times, and sends it to the player. Ignored for a player who is no member of
+    /// the instance (a stray on its map copy).
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="instance">The instance.</param>
     /// <param name="goal">The goal index.</param>
@@ -552,6 +610,12 @@ public sealed class InstanceHandlers(
         List<byte[]> packets;
         lock (instance.Lock)
         {
+            if (instance.Member(Id(session)) is null)
+            {
+                logger.LogWarning("[{Session}] {Name}: goal {Goal} of instance {Map} not defined: no member", session.Id,
+                    session.ActiveCharacter?.Name, goal, instance.MapId);
+                return;
+            }
             instance.Definitions[goal] = (npcId, needed);
             packets = GoalPackets(instance, goal);
         }
@@ -562,6 +626,7 @@ public sealed class InstanceHandlers(
 
     /// <summary>
     /// Adds to the progress of a goal and tells every member. Reaching goal 1 completes the instance, which then closes after the closing time.
+    /// Ignored for a player who is no member of the instance (a stray on its map copy), who could otherwise push another group's progress.
     /// </summary>
     /// <param name="session">The session of the player who earned the progress.</param>
     /// <param name="instance">The instance.</param>
@@ -576,6 +641,12 @@ public sealed class InstanceHandlers(
         int count;
         lock (instance.Lock)
         {
+            if (instance.Member(Id(session)) is null)
+            {
+                logger.LogWarning("[{Session}] {Name}: goal {Goal} +{Value} of instance {Map} refused: no member", session.Id, name, goal, value,
+                    instance.MapId);
+                return;
+            }
             count = instance.AddGoal(goal, value);
             members = [.. instance.Members.Select(m => m.Id)];
             if (goal == 1 && count > 0 && !instance.Completed)
@@ -710,7 +781,7 @@ public sealed class InstanceHandlers(
         }
     }
 
-    /// <summary>Removes an instance, tells its members and sends those standing on its map out.</summary>
+    /// <summary>Removes an instance, tells its members and sends out everyone standing on its map, members or not.</summary>
     /// <param name="instance">The instance.</param>
     /// <param name="members">The login ids of its members.</param>
     private void Close(Instance instance, List<int> members)
@@ -726,6 +797,7 @@ public sealed class InstanceHandlers(
             if (session.ActiveCharacter is { } character && character.MapId == instance.MapId)
                 SendOut(session, character);
         }
+        SendOutStayers(instance);
         logger.LogInformation("Instance {Map} ({Title}) closed", instance.MapId, instance.Scene.Name);
     }
 

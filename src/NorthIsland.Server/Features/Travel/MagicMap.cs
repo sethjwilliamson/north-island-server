@@ -11,9 +11,6 @@ public static class MagicMap
     /// <summary>The item ids of the Dragonflies, which teleport once.</summary>
     public static readonly ImmutableArray<ushort> Dragonflies = [34169, 34332]; // 34169 Bamboo Dragonfly, 34332 Mini Dragonfly
 
-    /// <summary>The maps from which magic travel is refused.</summary>
-    public static readonly ImmutableArray<ushort> NoTeleportMaps = [10004, 10009, 12064]; // 10004 Prison, 10009 Maze, 12064 2F, the Capitol
-
     /// <summary>The places in order: name, map, x and y.</summary>
     private static readonly ImmutableArray<(string, ushort, ushort, ushort)> Rows =
         [

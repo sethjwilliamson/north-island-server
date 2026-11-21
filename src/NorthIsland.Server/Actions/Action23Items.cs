@@ -41,7 +41,6 @@ namespace NorthIsland.Server.Actions;
 /// <param name="utensilStall">The <c>UtensilStallHandlers</c> that serve the packets of this action.</param>
 /// <param name="atm">The <c>AtmHandlers</c> that serve the packets of this action.</param>
 /// <param name="portableBox">The <c>PortableBoxHandlers</c> that serve the packets of this action.</param>
-/// <param name="warehouse">The <c>WarehouseHandlers</c> that serve the packets of this action.</param>
 /// <param name="magnet">The <c>MagnetHandlers</c> that serve the packets of this action.</param>
 /// <param name="teleport">The <c>TeleportHandlers</c> that serve the packets of this action.</param>
 /// <param name="capsule">The <c>CapsuleHandlers</c> that serve the packets of this action.</param>
@@ -88,7 +87,6 @@ public sealed class Action23Items(
     UtensilStallHandlers utensilStall,
     AtmHandlers atm,
     PortableBoxHandlers portableBox,
-    WarehouseHandlers warehouse,
     MagnetHandlers magnet,
     TeleportHandlers teleport,
     CapsuleHandlers capsule,
@@ -122,8 +120,8 @@ public sealed class Action23Items(
             .On(Action23.StallClose, "close stall", stall.OnClose) // 23/31: close the item stall
             .On(Action23.StallBrowse, "browse stall", stall.OnBrowse) // 23/32: look at the items on offer in a stall
             .On(Action23.StallBuy, "buy from stall", stall.OnBuy) // 23/33: buy items from a stall
-            .On(Action23.WareDeposit, "warehouse deposit", warehouse.OnDeposit) // 23/34: put items into the warehouse
-            .On(Action23.WareWithdraw, "warehouse withdraw", warehouse.OnWithdraw) // 23/35: take items out of the warehouse
+            // 23/34 and 23/35 (warehouse deposit and withdraw) are not routed: only the warehouse window sends them, and the server opens the
+            // warehouse as the Item Bag (action 68) instead
             .On(Action23.Dye, "dye", dye.OnDye) // 23/38: dye a part of the character
             .On(Action23.EnterWater, "enter water", hotSpring.OnEnter) // 23/51: step into the water of a hot spring
             .On(Action23.LeaveWater, "leave water", HotSpringHandlers.OnLeave) // 23/52: leave the water of a hot spring

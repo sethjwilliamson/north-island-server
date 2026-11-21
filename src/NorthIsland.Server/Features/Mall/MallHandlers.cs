@@ -211,7 +211,7 @@ public sealed class MallHandlers(
     {
         if (session.State != SessionState.InWorld || session.Account is not { } account || session.ActiveCharacter is not { } character || body.Length < 1)
             return ValueTask.CompletedTask;
-        var rows = session.Event?.PointStoreRows ?? [];
+        var rows = OpenServices.Of(session, character, ServiceWindow.PointStore)?.Rows ?? []; // the point store the server opened on this map, out of battle
         var r = new PacketReader(body.Span);
         var n = r.U8();
         for (var i = 0; i < n; i++)

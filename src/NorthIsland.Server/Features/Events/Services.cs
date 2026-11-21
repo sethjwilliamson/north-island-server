@@ -89,6 +89,7 @@ public sealed class Services(
         {
             case SellEquipment: // window to sell equipment
             case SellGoods: // window to sell goods
+                OpenServices.Open(session, session.ActiveCharacter!, code == SellEquipment ? ServiceWindow.SellEquipment : ServiceWindow.SellGoods);
                 session.Send(ShopMessages.OpenSell(equipment: code == SellEquipment));
                 logger.LogInformation("[{Session}] sell window ({Kind})", session.Id, code == SellEquipment ? "equipment" : "goods");
                 return true;

@@ -113,8 +113,10 @@ public sealed class OnlineDrawHandlers(
     }
 
     /// <summary>
-    /// Handles a draw request: refuses it when the daily draws are used up or the bag has no room, otherwise rolls a prize, puts it in the bag,
-    /// answers with the place and announces a top prize to the 2014 clients online.
+    /// Handles a draw request: refuses it when the daily draws are used up or the bag has no room for any one of the prizes, otherwise rolls a
+    /// prize, puts it in the bag, answers with the place and announces a top prize to the 2014 clients online. The room is checked for every
+    /// prize before the roll: refusing only a rolled prize that does not fit, without using a draw, would let a player draw again and again
+    /// until a wanted prize is the one that fits.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body, not read.</param>
@@ -131,19 +133,16 @@ public sealed class OnlineDrawHandlers(
             return ValueTask.CompletedTask;
         }
         var used = Used(c);
-        var place = Pick(rows, GameRandom.Shared);
-        var pick = prizes[place];
-        List<BagItem> trial = [
-            .. c.Bag.Select(
-                b => new BagItem { Slot = b.Slot, ItemId = b.ItemId, Count = b.Count, Wear = b.Wear, Fusion = b.Fusion, Pose = b.Pose, BoxItem = b.BoxItem })
-        ];
-        var room = Bag.Add(trial, items, pick.Item, pick.Count).Sum(x => x.Added) == pick.Count;
+        var room = prizes.All(p => Bag.Add(Bag.Trial(c.Bag), items, p.Item, p.Count).Sum(x => x.Added) == p.Count);
         if (used >= DrawsPerDay || !room)
         {
-            logger.LogInformation("[{Session}] {Name}: online draw refused ({Used} used, room in the bag: {Room})", session.Id, c.Name, used, room);
+            logger.LogInformation("[{Session}] {Name}: online draw refused ({Used} used, room in the bag for every prize: {Room})", session.Id, c.Name, used,
+                room);
             session.Send(Info(used, prizes));
             return ValueTask.CompletedTask;
         }
+        var place = Pick(rows, GameRandom.Shared);
+        var pick = prizes[place];
         c.OnlineDrawsUsed = (byte)(used + 1);
         foreach (var (stack, added) in Bag.Add(c, items, pick.Item, pick.Count))
             session.Send(ItemMessages.BagAdd(new BagEntry { Slot = stack.Slot, ItemId = pick.Item, Count = added, Wear = stack.Wear }));

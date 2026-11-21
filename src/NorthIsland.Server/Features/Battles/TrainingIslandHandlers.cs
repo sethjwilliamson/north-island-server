@@ -7,10 +7,12 @@ namespace NorthIsland.Server.Features.Battles;
 
 /// <summary>Handles the training vouchers, tickets and fares, their timed state and the teleport to the Training Island.</summary>
 /// <param name="world">The world state used to move the player.</param>
+/// <param name="travel">The teleport rule, for the states and maps that keep the player from teleporting to the island.</param>
 /// <param name="options">The item options holding the ticket duration and the longest allowed training time.</param>
 /// <param name="logger">The logger.</param>
 public sealed class TrainingIslandHandlers(
     WorldState world,
+    TravelRules travel,
     IOptions<ItemOptions> options,
     ILogger<TrainingIslandHandlers> logger)
 {
@@ -126,19 +128,18 @@ public sealed class TrainingIslandHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Moves the player to the Training Island unless something prevents it, in which case it only logs why.</summary>
+    /// <summary>
+    /// Moves the player to the Training Island unless something prevents it, in which case it only logs why: the teleport rule's leave rule
+    /// (<see cref="TravelRules.LeaveRefusal"/>: a busy state, or a map that cannot be left by teleport), riding a vehicle, or being there.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="c">The player's character.</param>
     private void Teleport(GameSession session, Character c)
     {
-        string? why = session.Battle is not null ? "in a battle"
-            : session.Stalls.Any ? "at a stall"
-                : session.Vehicle is not null ? "on a vehicle"
-                    : session.Event is not null || session.Minigame is not null ? "in an event or a game"
-                        : TentHandlers.IsHouseMap(c.MapId) ? "in a house"
-                            : MagicMap.NoTeleportMaps.Contains(c.MapId) ? "on a map that cannot be left this way"
-                                : c.MapId == IslandMap ? "already there"
-                                    : null;
+        var why = travel.LeaveRefusal(session, c)
+            ?? (session.Vehicle is not null ? "on a vehicle"
+                : c.MapId == IslandMap ? "already there"
+                    : null);
         if (why is not null)
         {
             logger.LogInformation("[{Session}] {Name}: Training Island teleport refused: {Why}", session.Id, c.Name, why);

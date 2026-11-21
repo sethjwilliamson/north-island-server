@@ -115,10 +115,17 @@ public sealed class Fighter
     public bool Defending { get; set; }
 
     /// <summary>
-    /// For a player or pet, the normal attack id its client last sent in this battle (the client picks it from the weapon); 0 until one
-    /// was sent. A counter of a player or pet is played with it.
+    /// The normal attack id of a player or pet, 0 when it has none: for a player, the attack of the worn weapon's kind, which the server
+    /// plays whatever normal attack id the client sends; for a pet, the normal attack id its client last sent in this battle, 0 until one
+    /// was sent. A normal attack and a counter of a player or pet are played with it.
     /// </summary>
     public ushort NormalAttackId { get; set; }
+
+    /// <summary>True once the fighter has chosen a command that was played, or called a pet, in this battle.</summary>
+    public bool Acted { get; set; }
+
+    /// <summary>True once the player has been taken out of the battle and what it cost or gave them settled, which happens once.</summary>
+    public bool Settled { get; set; }
 
     /// <summary>The session of a player or pet fighter; null for monsters and map NPCs.</summary>
     public GameSession? Session { get; init; }

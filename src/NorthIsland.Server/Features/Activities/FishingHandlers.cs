@@ -88,15 +88,25 @@ public sealed class FishingHandlers(
         session.Send(packet);
         world.Broadcast(session, packet, sameMapOnly: true);
         logger.LogInformation("[{Session}] {Name} starts fishing with {Rod} (kind {Kind})", session.Id, character.Name, record.Name, kind);
-        _ = FishAsync(session, kind, cts.Token);
+        _ = FishAsync(session, rod.ItemId, kind, character.MapId, cts.Token);
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>The fishing loop: waits for each attempt and puts what it catches in the bag until cancelled.</summary>
+    /// <summary>
+    /// The fishing loop: waits for each attempt and puts what it catches in the bag until cancelled. Before each attempt it checks that the
+    /// player still holds the fishing tool, is not in a battle and is still on the map they started on; otherwise it stops the fishing.
+    /// </summary>
     /// <param name="session">The player's session.</param>
+    /// <param name="rodId">The item id of the fishing tool the player started with.</param>
     /// <param name="kind">The tool kind, 1 and up, choosing the weight column.</param>
+    /// <param name="map">The map id the player started fishing on.</param>
     /// <param name="token">Cancels the loop.</param>
-    private async Task FishAsync(GameSession session, byte kind, CancellationToken token)
+    private async Task FishAsync(
+        GameSession session,
+        ushort rodId,
+        byte kind,
+        ushort map,
+        CancellationToken token)
     {
         try
         {
@@ -104,7 +114,20 @@ public sealed class FishingHandlers(
             {
                 await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, options.Value.FishingSeconds)), token).ConfigureAwait(false);
                 using var exclusive = await session.ExclusiveAsync().ConfigureAwait(false); // the catch goes in the bag between packets
-                if (session.ActiveCharacter is not { } character || GameRandom.Shared.Next(100) >= options.Value.FishingCatchPercent)
+                if (token.IsCancellationRequested || session.ActiveCharacter is not { } character)
+                    return;
+                var why = session.State != SessionState.InWorld ? "left the world"
+                    : session.Battle is not null ? "is in a battle"
+                    : character.MapId != map ? "left the map"
+                    : !character.Bag.Exists(b => b.ItemId == rodId) ? "no longer holds the fishing tool"
+                    : null;
+                if (why is not null)
+                {
+                    logger.LogWarning("[{Session}] {Name}: fishing stops, the player {Why}", session.Id, character.Name, why);
+                    Stop(session, world);
+                    return;
+                }
+                if (GameRandom.Shared.Next(100) >= options.Value.FishingCatchPercent)
                     continue;
                 var maxRank = MaxCatchRank(kind, LifeSkills.FishingLevel(character));
                 var catchId = Pick(kind, GameRandom.Shared, id => items[id] is { } item && item.ShopColumn <= maxRank);

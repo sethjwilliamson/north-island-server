@@ -48,7 +48,10 @@ public sealed class BedHandlers(
     /// <returns>The number of sleeping pets.</returns>
     private static int Used(Character c) => c.Furniture.Sum(f => f.Sleepers.Count);
 
-    /// <summary>Handles <c>62/43</c>: the owner puts a pet into a bed; the pet leaves their pet list and sleeps there.</summary>
+    /// <summary>
+    /// Handles <c>62/43</c>: the owner puts a pet into a bed; the pet leaves their pet list and sleeps there. Refused while a pet trade is
+    /// open, so a pet on offer cannot leave the team before the trade is carried out.
+    /// </summary>
     /// <param name="session">The owner's session.</param>
     /// <param name="body">The furniture index (two bytes) and the pet slot.</param>
     internal ValueTask OnStore(GameSession session, ReadOnlyMemory<byte> body)
@@ -61,9 +64,9 @@ public sealed class BedHandlers(
         var pet = c.Pets.Find(p => p.Slot == petSlot);
         var capacity = piece is null ? 0 : Capacity(piece.ItemId);
         if (piece is null || pet is null || capacity == 0 || piece.Sleepers.Count >= capacity || Used(c) >= MaxSleepers || pet.Tradable != 1
-            || session.RidingPetSlot == petSlot || session.Stalls.Pets is not null || c.ActivePetId == pet.NpcId)
+            || session.RidingPetSlot == petSlot || session.Stalls.Pets is not null || c.ActivePetId == pet.NpcId || session.Trades.Pets is not null)
         {
-            logger.LogInformation("[{Session}] {Name}: pet slot {Slot} into bed {Furn} refused", session.Id, c.Name, petSlot, furn);
+            logger.LogWarning("[{Session}] {Name}: pet slot {Slot} into bed {Furn} refused", session.Id, c.Name, petSlot, furn);
             return ValueTask.CompletedTask;
         }
         var bed = Enumerable.Range(1, capacity).Select(i => (byte)i).First(i => !piece.Sleepers.Exists(s => s.Bed == i));

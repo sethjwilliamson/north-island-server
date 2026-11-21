@@ -31,11 +31,19 @@ builder.Logging.AddSimpleConsole(o =>
     o.TimestampFormat = "HH:mm:ss.fff ";
 });
 
-var logDirectory = ServerPaths.Resolve(builder.Configuration[$"{ServerOptions.Section}:{nameof(ServerOptions.LogDirectory)}"] ?? "logs");
+// The console escapes control characters in messages as the log file does: text a client sent must not reach the terminal raw.
+PrintableLoggerProvider.WrapConsole(builder.Logging);
 
-builder.Logging.AddProvider(new FileLoggerProvider(logDirectory));
+var serverSection = builder.Configuration.GetSection(ServerOptions.Section);
 
-builder.Services.AddGameServer(builder.Configuration.GetSection(ServerOptions.Section));
+var logDirectory = ServerPaths.Resolve(serverSection[nameof(ServerOptions.LogDirectory)] ?? "logs");
+
+builder.Logging.AddProvider(new FileLoggerProvider(
+    logDirectory,
+    serverSection.GetValue(nameof(ServerOptions.LogFileMegabytes), FileLoggerProvider.DefaultFileMegabytes),
+    serverSection.GetValue(nameof(ServerOptions.LogFilesPerDay), FileLoggerProvider.DefaultFilesPerDay)));
+
+builder.Services.AddGameServer(serverSection);
 
 await builder.Build().RunAsync().ConfigureAwait(false);
 

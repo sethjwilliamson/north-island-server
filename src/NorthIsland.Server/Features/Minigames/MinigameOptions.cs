@@ -15,6 +15,11 @@ public sealed class MinigameOptions
     /// <summary>The lives a Q&amp;A player starts with; a wrong or missing answer costs one.</summary>
     public int QuizLives { get; set; } = 5;
 
+    /// <summary>
+    /// The seconds the Q&amp;A waits after its first player joins before it asks the first question; players can join only in this time.
+    /// </summary>
+    public int QuizStartSeconds { get; set; } = 15;
+
     /// <summary>The percent chance that a question is a generated sum instead of one from the question bank.</summary>
     public int QuizMathPercent { get; set; } = 40;
 

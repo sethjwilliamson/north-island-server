@@ -1,5 +1,6 @@
 using System.Collections.Frozen;
 using Microsoft.Extensions.Logging;
+using NorthIsland.GameData.Items;
 using NorthIsland.Protocol.IO;
 using NorthIsland.Protocol.Messages.Events;
 using NorthIsland.Protocol.Messages.Items;
@@ -125,9 +126,10 @@ public sealed class TentHandlers(
         var (style, slot, set) = (body.Span[0], body.Span[1], body.Span[2]);
         var stack = character.Bag.Find(b => b.Slot == slot);
         if (character.Tent is not { } tent || stack is null || !Palettes.TryGetValue(stack.ItemId, out var palette)
-            || palette.Set != set || style < 1 || style > palette.Styles)
+            || palette.Set != set || style < 1 || style > palette.Styles || BagLocks.IsLocked(session, slot))
         {
-            logger.LogWarning("[{Session}] {Name}: tent style {Style} from bag slot {Slot} refused", session.Id, character.Name, style, slot);
+            logger.LogWarning("[{Session}] {Name}: tent style {Style} from bag slot {Slot} refused ({Why})", session.Id, character.Name, style, slot,
+                BagLocks.LockedBy(session, slot) ?? "no tent, palette or style");
             return ValueTask.CompletedTask;
         }
         (tent.Kind1, tent.Kind2) = set == 1 ? (style, (byte)0) : ((byte)0, style);
@@ -156,10 +158,13 @@ public sealed class TentHandlers(
         var r = new PacketReader(body.Span);
         var (index, binIndex) = (r.U16(), r.U16());
         var piece = character.Furniture.Find(f => f.Index == index);
-        if (piece is null || index == binIndex || piece.ItemId == WorkPlatform || character.Furniture.Exists(f => f.Parent == index)
-            || !character.Furniture.Exists(f => f.Index == binIndex && f.ItemId is RecyclingBin or 38059)) // Kitty Recycling Bin
+        var why = piece is null || index == binIndex || piece.ItemId == WorkPlatform || character.Furniture.Exists(f => f.Parent == index)
+            || !character.Furniture.Exists(f => f.Index == binIndex && f.ItemId is RecyclingBin or 38059) // Kitty Recycling Bin
+            ? "not a piece that can go into this bin"
+            : LeaveRefusal(character, [piece]);
+        if (why is not null || piece is null)
         {
-            logger.LogWarning("[{Session}] {Name}: recycle furniture {Index}: refused", session.Id, character.Name, index);
+            logger.LogWarning("[{Session}] {Name}: recycle furniture {Index}: {Why}", session.Id, character.Name, index, why);
             return ValueTask.CompletedTask;
         }
         character.Furniture.Remove(piece);
@@ -195,6 +200,39 @@ public sealed class TentHandlers(
     /// <summary>The item id of the Recycling Bin furniture.</summary>
     public const ushort RecyclingBin = 38055; // Resource Recycling
 
+    /// <summary>The item types of house pieces: accessories and small tools (28), instruments (29) and furniture (30).</summary>
+    public const byte AccessoryType = 28, InstrumentType = 29, FurnitureType = 30;
+
+    /// <summary>
+    /// Whether an item can stand in a house as a piece of furniture, by the client's rule (CheckHomeDiscard, "placeable"): a furniture item that
+    /// is not a floor or wallpaper, or a large (more than one bag cell) instrument or accessory, with a furniture size on all three axes
+    /// (<see cref="ItemRecord.FurnitureSize"/>). Anything else, such as a vehicle, a tent or equipment, cannot be placed.
+    /// </summary>
+    /// <param name="r">The item's Item.dat record, null for an unknown item.</param>
+    /// <returns>True when the item can be placed as furniture.</returns>
+    public static bool IsPlaceable(ItemRecord? r) =>
+        r is { FurnitureSize: [> 0, > 0, > 0] }
+            && (r.Type == FurnitureType ? !HouseDecorHandlers.IsFloor(r.Id) && !HouseDecorHandlers.IsWallpaper(r.Id)
+                : r.Type is AccessoryType or InstrumentType && (r.CellWidth != 1 || r.CellHeight != 1));
+
+    /// <summary>Whether an item can be put on a work platform as a tool, by the client's rule: an instrument of one bag cell.</summary>
+    /// <param name="r">The item's Item.dat record, null for an unknown item.</param>
+    /// <returns>True when the item is a tool.</returns>
+    public static bool IsTool(ItemRecord? r) => r is { Type: InstrumentType, CellWidth: 1, CellHeight: 1 };
+
+    /// <summary>
+    /// Returns why furniture pieces cannot leave the house (be taken back or recycled), or null when they can: a rented room door, a kept piece,
+    /// a piece that still holds items, sleeping pets, offers or a stall case.
+    /// </summary>
+    /// <param name="character">The house owner's character.</param>
+    /// <param name="pieces">The pieces leaving, a piece with the tools on it.</param>
+    /// <returns>The reason as log text; null when the pieces may leave.</returns>
+    private static string? LeaveRefusal(Character character, List<Furniture> pieces) =>
+        pieces.Exists(p => p.RentStartUtc is not null || p.Retained) ? "rented out or kept"
+            : pieces.Exists(p => p.Contents.Count > 0 || p.Sleepers.Count > 0 || p.Stock.Count > 0)
+                || character.StallCases.Exists(x => pieces.Exists(p => p.Index == x.FurnIndex)) ? "still holds items"
+                : null;
+
     /// <summary>Gives a house that was never furnished its two default pieces, a Work Platform and a Recycling Bin.</summary>
     /// <param name="owner">The owner's character.</param>
     private static void EnsureDefaultFurniture(Character owner)
@@ -221,11 +259,40 @@ public sealed class TentHandlers(
         return character is null ? null : new TentOwner(ownerId, character, null);
     }
 
-    /// <summary>Finds the owner of the house on a house map.</summary>
+    /// <summary>
+    /// Finds the owner of the house on a house map. House maps wrap around every 2000 accounts, so several accounts can share one; the online
+    /// account whose tent is pitched (the one whose house is open, see <see cref="SharerInUse"/>) is the owner then, otherwise the first account.
+    /// </summary>
     /// <param name="houseMapId">The house map id.</param>
     /// <returns>The owner; null when no account has that house.</returns>
-    public TentOwner? OwnerOfHouse(int houseMapId) =>
-        store.All().FirstOrDefault(a => HouseMapOf(a.LoginId) == houseMapId) is { } account ? OwnerById(account.LoginId) : null;
+    public TentOwner? OwnerOfHouse(int houseMapId)
+    {
+        if (world.OnlineSessions().FirstOrDefault(s => s.Account is { } a && HouseMapOf(a.LoginId) == houseMapId && s.ActiveCharacter?.Tent is not null)
+            is { Account: { } host })
+            return OwnerById(host.LoginId);
+        return store.All().FirstOrDefault(a => HouseMapOf(a.LoginId) == houseMapId) is { } account ? OwnerById(account.LoginId) : null;
+    }
+
+    /// <summary>
+    /// Finds another online account that shares an account's house map (house maps wrap around every 2000 accounts) and has its house in use:
+    /// its tent is pitched or it stands on the map. Only one of the accounts sharing a map may use it at a time, so that nobody is put into, or
+    /// given owner rights in, the house of another account.
+    /// </summary>
+    /// <param name="ownerId">The account's login id.</param>
+    /// <returns>The other account's session; null when no other account uses the map.</returns>
+    public GameSession? SharerInUse(int ownerId)
+    {
+        var map = HouseMapOf(ownerId);
+        return world.OnlineSessions().FirstOrDefault(s => s.Account is { } a && a.LoginId != ownerId && HouseMapOf(a.LoginId) == map
+            && s.ActiveCharacter is { } c && (c.Tent is not null || c.MapId == map));
+    }
+
+    /// <summary>Finds the owner of the house a character stands in, when it is the given account.</summary>
+    /// <param name="visitor">The character in the house.</param>
+    /// <param name="ownerId">The login id of the owner the client named.</param>
+    /// <returns>The owner; null when the character is not in that account's house.</returns>
+    public TentOwner? HouseOwnerFor(Character visitor, int ownerId) =>
+        IsHouseMap(visitor.MapId) && HouseMapOf(ownerId) == visitor.MapId && OwnerOfHouse(visitor.MapId) is { } owner && owner.Id == ownerId ? owner : null;
 
     /// <summary>Lists the camps of every online player who has a tent pitched.</summary>
     /// <returns>The camp records.</returns>
@@ -252,7 +319,8 @@ public sealed class TentHandlers(
 
     /// <summary>
     /// Pitches a tent from a bag stack (<c>23/15</c>) at the character's position and tells everyone on the map. It is refused in a house, in a
-    /// battle, while riding, and when the tent limits of the map or server are reached; the player's other tent is taken down first.
+    /// battle, while riding, while another online account that shares the house map uses it (<see cref="SharerInUse"/>), and when the tent
+    /// limits of the map or server are reached; the player's other tent is taken down first.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="stack">The tent item in the bag.</param>
@@ -265,6 +333,12 @@ public sealed class TentHandlers(
             return;
         }
         var ownerId = session.Account!.LoginId;
+        if (SharerInUse(ownerId) is { } sharer)
+        {
+            logger.LogWarning("[{Session}] {Name}: cannot pitch a tent: house map {Map} is in use by account {Other}", session.Id, character.Name,
+                HouseMapOf(ownerId), sharer.Account!.LoginId);
+            return;
+        }
         var (perMap, perServer) = (options.Value.HouseLife.TentsPerMap, options.Value.HouseLife.TentsPerServer);
         var others = AllCamps().Where(c => c.OwnerId != ownerId).ToList();
         if (perServer > 0 && others.Count >= perServer)
@@ -354,7 +428,11 @@ public sealed class TentHandlers(
         character.Tent = null;
     }
 
-    /// <summary>Handles clicking a tent to go in (<c>65/1</c>): the player enters the house unless it is closed to them.</summary>
+    /// <summary>
+    /// Handles clicking a tent to go in (<c>65/1</c>): the player enters the house unless it is closed to them, they stand farther from the tent
+    /// than the client's screen reaches (<see cref="HouseLifeOptions.TentReachX"/>, <see cref="HouseLifeOptions.TentReachY"/>), or the house map
+    /// is shared with the player's own house or with another account that uses it (house maps wrap around every 2000 accounts).
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body after the action and sub code.</param>
     internal ValueTask OnEnter(GameSession session, ReadOnlyMemory<byte> body)
@@ -364,8 +442,21 @@ public sealed class TentHandlers(
         var ownerId = new PacketReader(body.Span).I32();
         var owner = OwnerById(ownerId);
         var tent = owner?.Character.Tent;
+        var (reachX, reachY) = (options.Value.HouseLife.TentReachX, options.Value.HouseLife.TentReachY);
         if (tent is null || tent.MapId != character.MapId)
             logger.LogInformation("[{Session}] {Name}: no tent of {Owner} here", session.Id, character.Name, ownerId);
+        else if ((reachX > 0 && Math.Abs(tent.X - character.X) > reachX) || (reachY > 0 && Math.Abs(tent.Y - character.Y) > reachY))
+        {
+            logger.LogWarning("[{Session}] {Name}: tent of {Owner} at ({TentX}, {TentY}) is out of reach of ({X}, {Y})", session.Id, character.Name,
+                ownerId, tent.X, tent.Y, character.X, character.Y);
+            session.Send(HouseMessages.EnterForbidden());
+        }
+        else if ((ownerId != session.Account!.LoginId && HouseMapOf(session.Account.LoginId) == HouseMapOf(ownerId)) || SharerInUse(ownerId) is not null)
+        {
+            logger.LogWarning("[{Session}] {Name}: house map {Map} of {Owner} is shared with another account in use", session.Id, character.Name,
+                HouseMapOf(ownerId), ownerId);
+            session.Send(HouseMessages.EnterForbidden());
+        }
         else if (tent.Locked && owner!.Session != session)
             session.Send(HouseMessages.EnterForbidden());
         else
@@ -447,7 +538,7 @@ public sealed class TentHandlers(
             return ValueTask.CompletedTask;
         var r = new PacketReader(body.Span);
         var (slot, x, y, z, dir) = (r.U8(), r.I32(), r.I32(), r.I32(), r.U8());
-        if (session.HouseRoom > 1 || TakeOne(session, character, slot, "place furniture") is not { } itemId)
+        if (session.HouseRoom > 1 || TakeOne(session, character, slot, IsPlaceable, "place furniture") is not { } itemId)
             return ValueTask.CompletedTask;
         var piece = new Furniture { Index = FreeIndex(character), ItemId = itemId, X = x, Y = y, Z = z, Dir = dir, Room = session.HouseRoom };
         character.Furniture.Add(piece);
@@ -471,12 +562,13 @@ public sealed class TentHandlers(
         var platform = character.Furniture.Find(f => f.Index == platformIndex && f.Parent == 0);
         var stack = character.Bag.Find(b => b.Slot == slot);
         var tools = character.Furniture.Where(f => f.Parent == platformIndex).ToList();
-        if (platform is null || stack is null || tools.Count >= Furniture.MaxToolsPerPlatform || tools.Exists(t => t.ItemId == stack.ItemId))
+        if (platform is null || platform.ItemId != WorkPlatform || stack is null || tools.Count >= Furniture.MaxToolsPerPlatform
+            || tools.Exists(t => t.ItemId == stack.ItemId))
         {
             logger.LogWarning("[{Session}] {Name}: tool from bag slot {Slot} cannot go on furniture {Index}", session.Id, character.Name, slot, platformIndex);
             return ValueTask.CompletedTask;
         }
-        if (TakeOne(session, character, slot, "place tool") is not { } itemId)
+        if (TakeOne(session, character, slot, IsTool, "place tool") is not { } itemId)
             return ValueTask.CompletedTask;
         var tool = new Furniture
         {
@@ -506,9 +598,10 @@ public sealed class TentHandlers(
         var (slot, count, binIndex) = (r.U8(), r.U8(), r.U16());
         var bin = character.Furniture.Find(f => f.Index == binIndex && f.ItemId is RecyclingBin or 38059); // Kitty Recycling Bin
         var stack = character.Bag.Find(b => b.Slot == slot);
-        if (bin is null || stack is null || stack.ItemId == character.Tent?.ItemId || session.Vehicle?.BagSlot == slot)
+        if (bin is null || stack is null || stack.ItemId == character.Tent?.ItemId || BagLocks.IsLocked(session, slot))
         {
-            logger.LogWarning("[{Session}] {Name}: recycle bag slot {Slot} at furniture {Bin}: refused", session.Id, character.Name, slot, binIndex);
+            logger.LogWarning("[{Session}] {Name}: recycle bag slot {Slot} at furniture {Bin}: refused ({Why})", session.Id, character.Name, slot,
+                binIndex, BagLocks.LockedBy(session, slot) ?? "no bin, an empty slot or the pitched tent");
             return ValueTask.CompletedTask;
         }
         var taken = count == 0 || count > stack.Count ? stack.Count : count;
@@ -522,7 +615,8 @@ public sealed class TentHandlers(
 
     /// <summary>
     /// Handles taking a furniture piece, with the tools on it, back into the bag (<c>62/2</c>). It is refused when the bag has no room, when a piece
-    /// is rented out or still holds items.
+    /// is rented out, kept or still holds items (<see cref="LeaveRefusal"/>), is not a furniture item or tool, or is a Magic Sandglass with uses
+    /// spent: the uses are kept on the placed piece only, so a new piece placed from the bag would start with all of them again.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body after the action and sub code.</param>
@@ -532,21 +626,24 @@ public sealed class TentHandlers(
             return ValueTask.CompletedTask;
         var index = new PacketReader(body.Span).U16();
         var piece = character.Furniture.Find(f => f.Index == index);
-        if (piece is null || piece.RentStartUtc is not null || piece.Retained)
+        if (piece is null)
             return ValueTask.CompletedTask;
         var pieces = character.Furniture.Where(f => f.Parent == index).Append(piece).ToList();
+        var why = LeaveRefusal(character, pieces)
+            ?? (!pieces.TrueForAll(p => p.Parent == 0 ? IsPlaceable(items[p.ItemId]) : IsTool(items[p.ItemId])) ? "not a furniture item"
+                : pieces.Exists(p => ManufactureHandlers.IsSandglass(p.ItemId) && p.Uses > 0) ? "a Magic Sandglass with uses spent"
+                    : null);
+        if (why is not null)
+        {
+            logger.LogWarning("[{Session}] {Name}: take back furniture {Index}: {Why}", session.Id, character.Name, index, why);
+            return ValueTask.CompletedTask;
+        }
         var trial = character.Bag.Select(
             b => new BagItem { Slot = b.Slot, ItemId = b.ItemId, Count = b.Count, Wear = b.Wear, Fusion = b.Fusion, Pose = b.Pose, BoxItem = b.BoxItem })
             .ToList();
         if (!pieces.TrueForAll(p => Bag.Add(trial, items, p.ItemId, 1).Count == 1))
         {
             logger.LogInformation("[{Session}] {Name}: no room in the bag for furniture {Index}", session.Id, character.Name, index);
-            return ValueTask.CompletedTask;
-        }
-        if (pieces.Exists(p => p.Contents.Count > 0 || p.Sleepers.Count > 0 || p.Stock.Count > 0)
-            || character.StallCases.Exists(x => pieces.Exists(p => p.Index == x.FurnIndex)))
-        {
-            logger.LogInformation("[{Session}] {Name}: furniture {Index} still holds items", session.Id, character.Name, index);
             return ValueTask.CompletedTask;
         }
         if (pieces.Exists(p => IsLockCarpet(p.ItemId)) && character.Tent is { } tent
@@ -590,20 +687,27 @@ public sealed class TentHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Takes one item out of a bag stack to be placed as furniture or a tool; equipment, tents and a full house are refused.</summary>
+    /// <summary>
+    /// Takes one item out of a bag stack to be placed as furniture or a tool; an item of the wrong kind, a locked bag slot (<see cref="BagLocks"/>:
+    /// in a trade, a stall, a house shelf, the pet express or the ridden vehicle) and a full house are refused.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="character">The player's active character.</param>
     /// <param name="slot">The bag slot.</param>
+    /// <param name="fits">Whether the item is of the kind wanted (<see cref="IsPlaceable"/> or <see cref="IsTool"/>).</param>
     /// <param name="what">What the item is for, used in the log.</param>
     /// <returns>The item id taken; null when the item cannot be used.</returns>
-    private ushort? TakeOne(GameSession session, Character character, byte slot, string what)
+    private ushort? TakeOne(GameSession session, Character character, byte slot, Func<ItemRecord?, bool> fits, string what)
     {
         var stack = character.Bag.Find(b => b.Slot == slot);
-        var item = stack is null ? null : items[stack.ItemId];
-        if (stack is null || item is null || item.IsEquipment || item.Type == TentItemType || character.Furniture.Count >= Furniture.MaxPieces
-            || session.Vehicle?.BagSlot == slot)
+        var why = stack is null ? "it is empty"
+            : !fits(items[stack.ItemId]) ? "the item is of the wrong kind"
+                : character.Furniture.Count >= Furniture.MaxPieces ? "the house is full"
+                    : BagLocks.LockedBy(session, slot) is { } locked ? $"it is {locked}"
+                        : null;
+        if (stack is null || why is not null)
         {
-            logger.LogWarning("[{Session}] {Name}: {What}: bag slot {Slot} cannot be used", session.Id, character.Name, what, slot);
+            logger.LogWarning("[{Session}] {Name}: {What}: bag slot {Slot} cannot be used: {Why}", session.Id, character.Name, what, slot, why);
             return null;
         }
         stack.Count--;

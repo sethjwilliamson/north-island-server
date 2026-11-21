@@ -18,6 +18,7 @@ public static class GridSort
     /// <param name="keep">Marks stacks that stay where they are, or null.</param>
     /// <param name="box">True for a box grid where every stack is one cell and stacks, whatever its size in Item.dat.</param>
     /// <param name="first">The item ids that go before all others, or null.</param>
+    /// <param name="locked">Cells the player locked against sorting (qol), or null: what lies there stays, and nothing is moved in.</param>
     /// <returns>True when the grid changed.</returns>
     public static bool Sort(
         List<BagItem> grid,
@@ -27,10 +28,14 @@ public static class GridSort
         int maxStack,
         Func<BagItem, bool>? keep = null,
         bool box = false,
-        ushort[]? first = null)
+        ushort[]? first = null,
+        IReadOnlySet<int>? locked = null)
     {
-        var fixedStacks = box ? [] : grid.Where(b => (keep?.Invoke(b) ?? false) || Bag.CellsOfStack(items, b, rows).Count > 1).ToList();
-        var covered = fixedStacks.SelectMany(b => Bag.CellsOfStack(items, b, rows)).ToHashSet();
+        var fixedStacks = grid.Where(b => (locked?.Contains(b.Slot) ?? false)
+            || (!box && ((keep?.Invoke(b) ?? false) || Bag.CellsOfStack(items, b, rows).Count > 1))).ToList();
+        var covered = fixedStacks.SelectMany(b => box ? new List<int> { b.Slot } : Bag.CellsOfStack(items, b, rows)).ToHashSet();
+        if (locked is not null)
+            covered.UnionWith(locked);
         var loose = grid.Except(fixedStacks).OrderBy(b => b.Slot).ToList();
         var merged = new List<BagItem>();
         foreach (var b in loose)

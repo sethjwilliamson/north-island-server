@@ -24,10 +24,43 @@ public sealed partial class BattleHandlers
         lock (battle.Lock)
         {
             if (battle.Phase != BattlePhase.Command || battle.OwnAt(command.ActorRow, command.ActorCol) is not { IsAlive: true } actor
-                || !ReferenceEquals(actor.Session, session) || actor.SummonedRound == battle.Round || !battle.Commands.TryAdd(actor, command))
+                || !ReferenceEquals(actor.Session, session) || actor.SummonedRound == battle.Round || battle.Commands.ContainsKey(actor))
                 return ValueTask.CompletedTask;
-            if (!isItem && (SkillTable.IsNormalAttack(command.SkillOrItem) || IsPetNormalAttack(actor, command.SkillOrItem)))
-                actor.NormalAttackId = command.SkillOrItem; // the weapon's attack the client chose, used for this fighter's counters
+            if (!isItem && actor.Kind == 2 && SkillTable.IsNormalAttack(command.SkillOrItem)) // player
+            {
+                // the player's weapon decides the attack, not the id the client sent
+                if (actor.NormalAttackId == 0)
+                {
+                    logger.LogWarning("[{Session}] round {Round}: {Actor} sends normal attack {Id}, but the worn weapon has none", session.Id,
+                        battle.Round, actor.Name, command.SkillOrItem);
+                    return ValueTask.CompletedTask;
+                }
+                if (command.SkillOrItem != actor.NormalAttackId)
+                {
+                    logger.LogWarning("[{Session}] round {Round}: {Actor} sends normal attack {Id}; the worn weapon's is {Weapon}", session.Id,
+                        battle.Round, actor.Name, command.SkillOrItem, actor.NormalAttackId);
+                    command = command with { SkillOrItem = actor.NormalAttackId };
+                }
+            }
+            else if (!isItem && IsPetNormalAttack(actor, command.SkillOrItem))
+            {
+                // the pet's record and worn weapon decide its attack, not the id the client sent (see NormalAttacks.OfPet)
+                var attack = NormalAttacks.OfPet(actor.Npc, id => items[id], actor.OwnedPet!.Equipment);
+                if (attack == 0)
+                {
+                    logger.LogWarning("[{Session}] round {Round}: pet {Actor} sends normal attack {Id}, but its worn weapon has none", session.Id,
+                        battle.Round, actor.Name, command.SkillOrItem);
+                    return ValueTask.CompletedTask;
+                }
+                if (command.SkillOrItem != attack)
+                {
+                    logger.LogWarning("[{Session}] round {Round}: pet {Actor} sends normal attack {Id}; its own is {Attack}", session.Id,
+                        battle.Round, actor.Name, command.SkillOrItem, attack);
+                    command = command with { SkillOrItem = attack };
+                }
+                actor.NormalAttackId = attack; // the pet's attack, used for this pet's counters
+            }
+            battle.Commands.Add(actor, command);
             logger.LogInformation("[{Session}] round {Round}: {Actor} ({Row},{Col}) uses {What} {Id} on ({TargetRow},{TargetCol})", session.Id,
                 battle.Round,
                 actor.Name,
@@ -145,9 +178,12 @@ public sealed partial class BattleHandlers
     /// <summary>Tells whether a skill is the normal attack of a pet.</summary>
     /// <param name="actor">The fighter.</param>
     /// <param name="skillId">The skill id of the command.</param>
-    /// <returns>True when the actor is a pet and the skill is a basic damage skill that is not one of the pet's own.</returns>
+    /// <returns>
+    /// True when the actor is a pet and the skill is a weapon attack (10004 Spell Attack among them, whose type is 2) or a basic damage skill, and
+    /// not one of the pet's own.
+    /// </returns>
     private bool IsPetNormalAttack(Fighter actor, ushort skillId) =>
-        actor.OwnedPet is not null && skills[skillId] is { Tree: 0, Type: 1 } && !Knows(actor, skillId);
+        actor.OwnedPet is not null && (SkillTable.IsNormalAttack(skillId) || skills[skillId] is { Tree: 0, Type: 1 }) && !Knows(actor, skillId);
 
     /// <summary>Tells whether a fighter knows a skill.</summary>
     /// <param name="actor">The player or pet.</param>

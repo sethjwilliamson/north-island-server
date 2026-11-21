@@ -37,11 +37,15 @@ public sealed class MiniGridHandlers(
         ExtraAmount = b.Extra,
     };
 
-    /// <summary>Opens the Item Bag: sends whether its cells are unlocked, the stored stacks, and the open command.</summary>
+    /// <summary>
+    /// Opens the Item Bag: records it as open for the character on any map (<see cref="OpenServices"/>), sends whether its cells are unlocked,
+    /// the stored stacks, and the open command.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="c">The player's character.</param>
     public void Open(GameSession session, Character c)
     {
+        OpenServices.Open(session, c, ServiceWindow.ItemBag);
         session.Send(new PacketWriter(Action23.Code, Action23.SpaceContract).U8(space.Has(c, SpaceContract.Stock) ? (byte)1 : (byte)2).ToArray());
         var w = new PacketWriter(Action68.Code, Action68.List);
         foreach (var b in c.MiniGrid.OrderBy(b => b.Slot))
@@ -51,15 +55,32 @@ public sealed class MiniGridHandlers(
         logger.LogInformation("[{Session}] {Name}: Item Bag ({Count} stack(s))", session.Id, c.Name, c.MiniGrid.Count);
     }
 
-    /// <summary>Carries out an Item Bag order and echoes it to the client when it was done, or logs it as refused.</summary>
+    /// <summary>
+    /// Carries out an Item Bag order and echoes it to the client when it was done, or logs it as refused. Needs the Item Bag open for the
+    /// character, on any map, out of battle (<see cref="OpenServices"/>).
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: u8 source, u8 destination, u8 count.</param>
     /// <param name="kind">The sub code of the order: take to the bag, move inside the Item Bag, or put in.</param>
     internal ValueTask Order(GameSession session, ReadOnlyMemory<byte> body, byte kind)
     {
         var c = session.ActiveCharacter;
-        if (session.State != SessionState.InWorld || c is null || session.Battle is not null || body.Length < 3)
+        if (session.State != SessionState.InWorld || c is null || body.Length < 3)
             return ValueTask.CompletedTask;
+        if (!OpenServices.IsOpen(session, c, ServiceWindow.ItemBag))
+        {
+            if (session.ProblemLog.TryTake(logger, session.Id)) // a client can repeat a refused order at will
+            {
+                logger.LogWarning(
+                    "[{Session}] {Name}: Item Bag order {Kind} refused, no Item Bag open (opened on map {WindowMap}, in battle {Battle})",
+                    session.Id,
+                    c.Name,
+                    kind,
+                    OpenServices.MapOf(session, ServiceWindow.ItemBag),
+                    session.Battle is not null);
+            }
+            return ValueTask.CompletedTask;
+        }
         var (src, dst, count) = (body.Span[0], body.Span[1], body.Span[2]);
         if (count == 0)
             return ValueTask.CompletedTask;
@@ -71,14 +92,14 @@ public sealed class MiniGridHandlers(
         };
         if (done)
             session.Send(new PacketWriter(Action68.Code, kind).U8(src).U8(dst).U8(count).ToArray());
-        else
+        else if (session.ProblemLog.TryTake(logger, session.Id))
             logger.LogInformation("[{Session}] {Name}: Item Bag order {Kind} {From}->{To} x{Count} refused", session.Id, c.Name, kind, src, dst, count);
         return ValueTask.CompletedTask;
     }
 
     /// <summary>
-    /// Puts part or all of a bag stack into an Item Bag cell. Needs the stock keeper part of the contract, an item without the no-store flag, and it
-    /// must not be the ridden vehicle.
+    /// Puts part or all of a bag stack into an Item Bag cell. Needs the stock keeper part of the contract, an item without the no-store flag, and a
+    /// stack not committed elsewhere (<see cref="BagLocks"/>).
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="c">The player's character.</param>
@@ -94,7 +115,7 @@ public sealed class MiniGridHandlers(
         byte count)
     {
         var stack = c.Bag.Find(b => b.Slot == bagSlot);
-        if (stack is null || count > stack.Count || cell is 0 or > Cells || !space.Has(c, SpaceContract.Stock) || session.Vehicle?.BagSlot == bagSlot
+        if (stack is null || count > stack.Count || cell is 0 or > Cells || !space.Has(c, SpaceContract.Stock) || BagLocks.IsLocked(session, bagSlot)
             || (items[stack.ItemId]?.Flags & NoStoreFlag) != 0
             || GridStore.Place(items, c.MiniGrid, stack, cell, count, null, Rows, exact: true) is not { } placed
             || placed.Moved != count)

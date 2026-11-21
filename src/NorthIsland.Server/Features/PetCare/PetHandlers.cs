@@ -21,18 +21,28 @@ public sealed class PetHandlers(
     BattleHandlers battles,
     ILogger<PetHandlers> logger)
 {
-    /// <summary>Mounts a pet, and tells the player and the map.</summary>
+    /// <summary>
+    /// Mounts a pet, and tells the player and the map. The pet rests first when it is the active pet, as the client asks before riding;
+    /// riding is refused on a vehicle, while keeping a stall and while a pet trade is open.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the pet's slot, then its NPC id.</param>
     internal ValueTask OnRide(GameSession session, ReadOnlyMemory<byte> body)
     {
         if (PetOf(session, body) is not (var character, var pet) || body.Length < 5 || session.Battle is not null)
             return ValueTask.CompletedTask;
-        if (BinaryPrimitives.ReadInt32LittleEndian(body.Span[1..]) != pet.NpcId)
+        var why = BinaryPrimitives.ReadInt32LittleEndian(body.Span[1..]) != pet.NpcId ? $"the request names another pet than slot {pet.Slot}"
+            : session.Vehicle is { Riding: true } ? "rides a vehicle"
+                : session.Stalls.Any ? "keeps a stall"
+                    : session.Trades.Pets is not null ? "a pet trade is open"
+                        : null;
+        if (why is not null)
         {
-            logger.LogWarning("[{Session}] {Name}: ride request names another pet than slot {Slot}", session.Id, character.Name, pet.Slot);
+            logger.LogWarning("[{Session}] {Name}: ride on pet {Pet} refused ({Why})", session.Id, character.Name, pet.Name, why);
             return ValueTask.CompletedTask;
         }
+        if (character.ActivePetId == pet.NpcId)
+            RestActive(session, character);
         session.RidingPetSlot = pet.Slot;
         var packet = PetMessages.Mounted(pet.Slot, session.Account!.LoginId, pet.NpcId);
         session.Send(packet);
@@ -50,13 +60,21 @@ public sealed class PetHandlers(
         var character = session.ActiveCharacter;
         if (session.State != SessionState.InWorld || character is null)
             return ValueTask.CompletedTask;
+        Dismount(session, character);
+        return ValueTask.CompletedTask;
+    }
+
+    /// <summary>Gets the player off the pet they ride, and tells the player and the map.</summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="character">The player's character.</param>
+    private void Dismount(GameSession session, Character character)
+    {
         session.RidingPetSlot = 0;
         var packet = PetMessages.Dismounted(session.Account!.LoginId);
         session.Send(packet);
         world.Broadcast(session, packet, sameMapOnly: true);
         combat.Send(session);
         logger.LogInformation("[{Session}] {Name} gets off the pet", session.Id, character.Name);
-        return ValueTask.CompletedTask;
     }
 
     /// <summary>Teaches a pet a skill for skill points.</summary>
@@ -94,17 +112,26 @@ public sealed class PetHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Renames a pet to a name of 1 to 20 characters.</summary>
+    /// <summary>The longest pet name, in bytes: the name field of the stored-pet record.</summary>
+    private const int MaxNameLength = 20;
+
+    /// <summary>
+    /// Renames a pet that can be traded (the client offers the rename only for those) to a name of 1 to 20 printable bytes; control bytes
+    /// and DEL, which the client's text box never takes, refuse the name.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the pet's slot, then the new name.</param>
     internal ValueTask OnRename(GameSession session, ReadOnlyMemory<byte> body)
     {
         if (PetOf(session, body) is not (var character, var pet))
             return ValueTask.CompletedTask;
-        var name = GameEncoding.GetString(body.Span[1..]).Trim();
-        if (name.Length is 0 or > 20)
+        var raw = body.Span[1..];
+        var name = GameEncoding.GetString(raw).Trim();
+        var printable = raw.IndexOfAnyInRange((byte)0x00, (byte)0x1F) < 0 && !raw.Contains((byte)0x7F); // 0x00..0x1F control bytes, 0x7F DEL
+        if (name.Length is 0 or > MaxNameLength || !printable || pet.Tradable != 1)
         {
-            logger.LogWarning("[{Session}] {Name}: refused pet name '{PetName}'", session.Id, character.Name, name);
+            logger.LogWarning("[{Session}] {Name}: refused pet name '{PetName}' for pet {Pet} (tradable {Tradable})", session.Id, character.Name,
+                name.ReplaceLineEndings(" "), pet.Name, pet.Tradable);
             return ValueTask.CompletedTask;
         }
         logger.LogInformation("[{Session}] {Name} renames pet {Old} ({Id}) to {New}", session.Id, character.Name, pet.Name, pet.NpcId, name);
@@ -113,19 +140,28 @@ public sealed class PetHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Sends a pet away for good.</summary>
+    /// <summary>Sends a pet away for good; refused while a pet trade is open or the pet is on sale in the player's pet stall.</summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the pet's slot.</param>
     internal ValueTask OnExile(GameSession session, ReadOnlyMemory<byte> body)
     {
         if (PetOf(session, body) is not (var character, var pet) || session.Battle is not null)
             return ValueTask.CompletedTask;
+        if (session.Trades.Pets is not null || session.Stalls.Pets?.Prices.ContainsKey(pet.Slot) == true)
+        {
+            logger.LogWarning("[{Session}] {Name}: exile of pet {Pet} refused ({Why})", session.Id, character.Name, pet.Name,
+                session.Trades.Pets is not null ? "a pet trade is open" : "the pet is in his stall");
+            return ValueTask.CompletedTask;
+        }
         Pets.Exile(session, character, pet, world, combat);
         logger.LogInformation("[{Session}] {Name} exiles pet {Pet} ({Id}) from slot {Slot}", session.Id, character.Name, pet.Name, pet.NpcId, pet.Slot);
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Makes a pet the active pet that fights beside the player, and shows it on the map.</summary>
+    /// <summary>
+    /// Makes a pet the active pet that fights beside the player, and shows it on the map. A ridden pet gets the player off it first: the
+    /// client's fight command sends the join before the dismount, and a pet is never ridden and active at once.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the pet's NPC id.</param>
     internal ValueTask OnJoin(GameSession session, ReadOnlyMemory<byte> body)
@@ -146,6 +182,8 @@ public sealed class PetHandlers(
                 pet is null ? " (not owned)" : " during a battle");
             return ValueTask.CompletedTask;
         }
+        if (session.RidingPetSlot == pet.Slot)
+            Dismount(session, character);
         character.ActivePetId = pet.NpcId;
         session.Send(PetMessages.Active(pet.NpcId));
         world.ShowPet(session);
@@ -161,11 +199,19 @@ public sealed class PetHandlers(
         var character = session.ActiveCharacter;
         if (session.State != SessionState.InWorld || character is null || session.Battle is not null)
             return ValueTask.CompletedTask;
+        RestActive(session, character);
+        return ValueTask.CompletedTask;
+    }
+
+    /// <summary>Rests the active pet, tells the player and hides the pet from the map.</summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="character">The player's character.</param>
+    private void RestActive(GameSession session, Character character)
+    {
         logger.LogInformation("[{Session}] {Name}: pet {Id} rests", session.Id, character.Name, character.ActivePetId);
         character.ActivePetId = 0;
         session.Send(PetMessages.Rest());
         world.HidePet(session);
-        return ValueTask.CompletedTask;
     }
 
     /// <summary>Finds the pet in the slot a packet names, and logs a warning when there is none.</summary>

@@ -16,6 +16,7 @@ internal static class FeatureStartup
         _ = services.GetRequiredService<ItemHandlers>();
         _ = services.GetRequiredService<VehicleHandlers>();
         _ = services.GetRequiredService<ShopHandlers>();
+        services.GetRequiredService<OpenServices>().Start();
         _ = services.GetRequiredService<BankHandlers>();
         _ = services.GetRequiredService<ActivityHandlers>();
         _ = services.GetRequiredService<ItemEffectHandlers>();
@@ -69,8 +70,7 @@ internal static class FeatureStartup
         _ = services.GetRequiredService<WishItemHandlers>();
         _ = services.GetRequiredService<PotentialHandlers>();
         _ = services.GetRequiredService<AtmHandlers>();
-        _ = services.GetRequiredService<WarehouseHandlers>();
-        _ = services.GetRequiredService<InnHandlers>();
+        services.GetRequiredService<InnHandlers>().Start();
         _ = services.GetRequiredService<TradeHandlers>();
         services.GetRequiredService<BattleHandlers>().Start();
         _ = services.GetRequiredService<StatHandlers>();

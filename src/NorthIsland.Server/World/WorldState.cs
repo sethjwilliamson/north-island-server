@@ -8,8 +8,14 @@ using NorthIsland.Protocol.Messages.World;
 namespace NorthIsland.Server.World;
 
 /// <summary>The online world: who is online and where, and the packets passed between players on the same map or in the same team.</summary>
+/// <param name="travel">The teleport rule, for the maps a leader may not take the team onto and the states that keep a member back.</param>
+/// <param name="maps">The map data, to tell the instance copies.</param>
+/// <param name="instances">The live instances, for the members a leader may take onto an instance copy.</param>
 /// <param name="logger">The logger.</param>
 public sealed class WorldState(
+    TravelRules travel,
+    MapData maps,
+    InstanceRegistry instances,
     ILogger<WorldState> logger)
 {
     /// <summary>The online sessions by player id.</summary>
@@ -22,10 +28,6 @@ public sealed class WorldState(
     /// <param name="playerId">The player id.</param>
     /// <returns>True when online.</returns>
     public bool IsOnline(int playerId) => _online.ContainsKey(playerId);
-
-    /// <summary>The accounts of the online players.</summary>
-    /// <returns>The accounts.</returns>
-    public IReadOnlyList<Data.Account> OnlineAccounts() => [.. _online.Values.Select(s => s.Account).OfType<Data.Account>()];
 
     /// <summary>Finds the session of an online player.</summary>
     /// <param name="playerId">The player id.</param>
@@ -132,14 +134,52 @@ public sealed class WorldState(
     }
 
     /// <summary>
+    /// Closes another player's connection (a kick by a GM or by a later login of the account) and takes them out of the world at once, under
+    /// their gate, so that a later login of the account may enter the world straight away. The gate is taken before the close, as <see
+    /// cref="GameSession.TryExclusiveFrom"/> refuses a closing session; when it cannot be had (the player's work holds it, or their connection
+    /// already ended) the connection is only closed, and the disconnect cleanup takes them out of the world under their gate before the final save.
+    /// </summary>
+    /// <param name="holder">The session whose gate the caller holds (the GM's or the new login's); may be <paramref name="target"/>.</param>
+    /// <param name="target">The session to close; the caller sent it the kick packet.</param>
+    public void Disconnect(GameSession holder, GameSession target)
+    {
+        if (!target.TryExclusiveFrom(holder, out var held))
+        {
+            logger.LogInformation("[{Session}] closed; its disconnect cleanup takes it out of the world", target.Id);
+            target.Close();
+            return;
+        }
+        using (held)
+        {
+            target.Close();
+            Leave(target);
+        }
+    }
+
+    /// <summary>
     /// Takes a player out of the online world: ends their battle, auto collecting, fishing and team, banks their online
-    /// time and tells everyone.
+    /// time and tells everyone. For a session that is not the one online under its player id (not yet in the world, or
+    /// already left) and not in a battle it only drops what the session itself holds; a session that lost its account is
+    /// only removed. The caller holds the session's gate (<see cref="GameSession.ExclusiveAsync"/>): the disconnect
+    /// cleanup, or <see cref="Disconnect"/>; the <see cref="Leaving"/> handlers change the player's state under it.
     /// </summary>
     /// <param name="session">The player's session.</param>
     public void Leave(GameSession session)
     {
         if (session.Account is null)
+        {
+            RemoveWithoutAccount(session);
             return;
+        }
+        if ((!_online.TryGetValue(PlayerId(session), out var online) || !ReferenceEquals(online, session)) && session.Battle is null)
+        {
+            // not in the world (yet or any more): the team, friends and map of the player id may be a newer session's by now
+            session.AttributeSent = null;
+            if (session.Watching is { } watching)
+                lock (watching.Watchers)
+                    watching.Watchers.Remove(session);
+            return;
+        }
         Leaving?.Invoke(session);
         if (session.Battle is { } battle)
         {
@@ -165,6 +205,24 @@ public sealed class WorldState(
                 other.Send(left);
         }
         logger.LogInformation("[{Session}] {Name} left the world ({Count} online)", session.Id, session.ActiveCharacter?.Name, _online.Count);
+    }
+
+    /// <summary>Removes a session that is online without an account under whatever player id it was entered with, and tells everyone.</summary>
+    /// <param name="session">The session.</param>
+    private void RemoveWithoutAccount(GameSession session)
+    {
+        lock (_membership)
+        {
+            foreach (var entry in _online.Where(kv => ReferenceEquals(kv.Value, session)).ToList())
+            {
+                if (!_online.TryRemove(entry))
+                    continue;
+                var left = WorldServerMessages.PlayerLeft(entry.Key);
+                foreach (var other in _online.Values)
+                    other.Send(left);
+                logger.LogWarning("[{Session}] removed from the world without an account (player id {Id})", session.Id, entry.Key);
+            }
+        }
     }
 
     /// <summary>Relays a walk to the others on the map and moves the stored position of the online team members to the walker's.</summary>
@@ -202,8 +260,8 @@ public sealed class WorldState(
     }
 
     /// <summary>
-    /// Moves a player to a warp's map and spot: closes trades, stalls and fishing, stores the position, tells everyone and
-    /// takes along team members not in battle.
+    /// Moves a player to a warp's map and spot: closes trades, stalls and fishing, stores the position, tells everyone and takes along the
+    /// team members that may follow (see <see cref="PullRefusal"/>).
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="warp">The destination.</param>
@@ -211,6 +269,10 @@ public sealed class WorldState(
     {
         var character = session.ActiveCharacter!;
         var id = PlayerId(session);
+        var (fromMap, fromRoom) = (character.MapId, session.HouseRoom);
+        // a door of the leader's own event run on the map they leave, or a walk into a tent or between its rooms, may take the team onto
+        // a map no teleport reaches; any other warp (GM, activity, training, send-outs) takes the team only where a teleport could go
+        var walksIn = (session.Event is { Warping: true } run && run.MapId == fromMap) || TentHandlers.IsHouseMap(warp.MapId);
         MapLeaving?.Invoke(session);
         MapChanging?.Invoke(session, warp);
         StopAutoCollect(session);
@@ -235,10 +297,74 @@ public sealed class WorldState(
 
         foreach (var member in Teams.MembersOf(id))
         {
-            if (_online.TryGetValue(member, out var m) && m.ActiveCharacter is not null && m.Battle is null)
-                ChangeMap(m, warp);
+            if (!_online.TryGetValue(member, out var m) || m.ActiveCharacter is not { } mc)
+                continue;
+            if (PullRefusal(m, mc, fromMap, fromRoom, warp, walksIn) is { } why)
+            {
+                logger.LogInformation("[{Session}] {Name} stays behind as {Leader} warps to map {To}: {Why}", m.Id, mc.Name, character.Name,
+                    warp.MapId, why);
+                continue;
+            }
+            ChangeMap(m, warp);
         }
     }
+
+    /// <summary>
+    /// Gives why a team member may not be taken along by their leader's map change: they stand on another map or house room than the one
+    /// the leader leaves (members follow their leader within the scene), something keeps them busy (<see cref="FollowRefusal"/>),
+    /// the destination is an instance copy they are no member of, or it is a map no teleport reaches and the warp is no walk-in. A busy
+    /// member of the instance left behind outside it is told to go in through the instance window.
+    /// </summary>
+    /// <param name="member">The member's session.</param>
+    /// <param name="character">The member's active character.</param>
+    /// <param name="fromMap">The map id the leader leaves.</param>
+    /// <param name="fromRoom">The house room the leader leaves, 0 outside a house.</param>
+    /// <param name="warp">The leader's destination.</param>
+    /// <param name="walksIn">True when the warp is a door of the leader's own event run or a walk into a tent or between its rooms.</param>
+    /// <returns>The reason, or null when the member follows.</returns>
+    private string? PullRefusal(
+        GameSession member,
+        Character character,
+        ushort fromMap,
+        byte fromRoom,
+        DoorWarp warp,
+        bool walksIn)
+    {
+        if (character.MapId != fromMap || member.HouseRoom != fromRoom)
+            return $"on map {character.MapId} room {member.HouseRoom}, not with the leader";
+        var instanceCopy = maps.InstanceOfMap(warp.MapId) is not null;
+        var instanceMember = false;
+        if (instanceCopy && instances.ByMap(warp.MapId) is { } instance)
+        {
+            lock (instance.Lock)
+                instanceMember = instance.Member(PlayerId(member)) is not null;
+        }
+        if (FollowRefusal(member) is { } busy)
+        {
+            if (instanceMember && fromMap != warp.MapId) // a member left behind outside the copy goes in through the instance window
+                member.Send(InstanceMessages.InitResult(InstanceInitCodes.TooBusy));
+            return busy;
+        }
+        if (instanceCopy)
+            return instanceMember ? null : $"no member of the instance on map {warp.MapId}";
+        return travel.IsBarred(warp.MapId) && !walksIn ? $"map {warp.MapId} cannot be reached this way" : null;
+    }
+
+    /// <summary>
+    /// Gives why a team member's state keeps them from following their leader: <see cref="TravelRules.BusyRefusal"/> without its event clause.
+    /// A member often runs the same NPC event as the leader (the client mirrors the leader's NPC talk to the party), and the event engine ends
+    /// a member's run when they are moved off its map, so a running event does not keep them back.
+    /// </summary>
+    /// <param name="member">The member's session.</param>
+    /// <returns>The reason, or null when nothing holds the member.</returns>
+    private static string? FollowRefusal(GameSession member) =>
+        member.Battle is not null ? "in a battle"
+            : member.Watching is not null ? "watching a battle"
+                : member.Minigame is not null ? "in a game"
+                    : member.Stalls.Any ? "at a stall"
+                        : member.Trades.Items is not null || member.Trades.Pets is not null ? "trading"
+                            : member.Activities.Fishing is not null ? "fishing"
+                                : null;
 
     /// <summary>
     /// Runs when the client has loaded the map: sends the scene ready packet and the players, pets, rides, auto collectors
@@ -333,7 +459,9 @@ public sealed class WorldState(
     /// <summary>Called once a player's client has loaded a map.</summary>
     public Action<GameSession>? Arrived { get; set; }
 
-    /// <summary>Called when a player leaves the world, before their state is cleaned up.</summary>
+    /// <summary>
+    /// Called when a player leaves the world, before their state is cleaned up; the caller holds the player's gate (<see cref="Leave"/>).
+    /// </summary>
     public Action<GameSession>? Leaving { get; set; }
 
     /// <summary>Raised when an attribute packet about the player themself is sent, with the attribute id, its value and a second value.</summary>
@@ -568,15 +696,16 @@ public sealed class WorldState(
     /// <returns>The sessions.</returns>
     public IEnumerable<GameSession> OnlineSessions() => _online.Values;
 
-    /// <summary>The sessions of the online players other than one.</summary>
+    /// <summary>The sessions of the online players other than one, leaving out any session that lost its account or character.</summary>
     /// <param name="id">The player id to leave out.</param>
     /// <returns>The sessions.</returns>
-    private IEnumerable<GameSession> Others(int id) => _online.Where(kv => kv.Key != id).Select(kv => kv.Value);
+    private IEnumerable<GameSession> Others(int id) =>
+        _online.Where(kv => kv.Key != id && kv.Value is { Account: not null, ActiveCharacter: not null }).Select(kv => kv.Value);
 
     /// <summary>The player id of a session, which is its account's login id.</summary>
     /// <param name="session">The player's session.</param>
-    /// <returns>The player id.</returns>
-    private static int PlayerId(GameSession session) => session.Account!.LoginId;
+    /// <returns>The player id, or 0 (no player) when the session has no account.</returns>
+    private static int PlayerId(GameSession session) => session.Account?.LoginId ?? 0;
 
     /// <summary>Builds the record that shows a player to the others.</summary>
     /// <param name="session">The player's session.</param>

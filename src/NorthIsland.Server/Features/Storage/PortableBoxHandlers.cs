@@ -77,8 +77,8 @@ public sealed class PortableBoxHandlers(
     }
 
     /// <summary>
-    /// Moves part or all of a bag stack into a box cell, up to 50 in the cell; refused for an item the box does not take or a cell holding another
-    /// item.
+    /// Moves part or all of a bag stack into a box cell, up to 50 in the cell; refused for an item the box does not take, a cell holding another
+    /// item, a partly used stack, since a cell keeps only the item and its count, or a stack committed elsewhere (<see cref="BagLocks"/>).
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="c">The player's character.</param>
@@ -97,10 +97,18 @@ public sealed class PortableBoxHandlers(
         var stack = c.Bag.Find(b => b.Slot == bagSlot);
         var record = stack is null ? null : items[stack.ItemId];
         var current = cells.Find(x => x.Cell == cell);
+        var locked = BagLocks.LockedBy(session, bagSlot);
         if (stack is null || record is null || cell < 1 || cell > (picnic ? PicnicCells : ExpCells) || !Accepts(picnic, record)
+            || stack.Used != 0 || stack.Extra != 0 || locked is not null
             || (current is not null && (current.ItemId != stack.ItemId || current.Count >= MaxStack)))
         {
-            logger.LogInformation("[{Session}] {Name}: box put refused (slot {Slot}, cell {Cell})", session.Id, c.Name, bagSlot, cell);
+            logger.LogInformation(
+                "[{Session}] {Name}: box put refused (slot {Slot}, cell {Cell}{Locked})",
+                session.Id,
+                c.Name,
+                bagSlot,
+                cell,
+                locked is null ? "" : $", {locked}");
             return;
         }
         if (current is null)

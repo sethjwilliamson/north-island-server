@@ -120,7 +120,10 @@ public sealed class HouseFurnitureHandlers(
             && TentHandlers.HouseMapOf(session.Account.LoginId) == character.MapId ? character : null;
     }
 
-    /// <summary>Handles <c>62/41</c>: the owner puts a bag stack into a slot of a cupboard.</summary>
+    /// <summary>
+    /// Handles <c>62/41</c>: the owner puts a bag stack into a slot of a cupboard. A locked bag slot (<see cref="BagLocks"/>) stays in the bag, and
+    /// so does a stack with a used or extra amount, which a cupboard does not keep.
+    /// </summary>
     /// <param name="session">The owner's session.</param>
     /// <param name="body">The furniture index (two bytes), the bag slot and the cupboard slot.</param>
     internal ValueTask OnStore(GameSession session, ReadOnlyMemory<byte> body)
@@ -132,15 +135,17 @@ public sealed class HouseFurnitureHandlers(
         var piece = c.Furniture.Find(f => f.Index == furn);
         var stack = c.Bag.Find(b => b.Slot == bagSlot);
         if (piece is null || stack is null || items[stack.ItemId] is not { } item || slot < 1 || slot > Capacity(piece.ItemId)
-            || piece.Contents.Exists(x => x.Slot == slot) || (item.Flags & 32) != 0 || item.IsEquipment && stack.Wear >= 200)
+            || piece.Contents.Exists(x => x.Slot == slot) || (item.Flags & 32) != 0 || item.IsEquipment && stack.Wear >= 200 // flag 32: no storing
+            || stack.Used != 0 || stack.Extra != 0 || BagLocks.IsLocked(session, bagSlot))
         {
             logger.LogInformation(
-                "[{Session}] {Name}: cupboard {Furn} store of bag slot {Bag} into slot {Slot} refused",
+                "[{Session}] {Name}: cupboard {Furn} store of bag slot {Bag} into slot {Slot} refused ({Why})",
                 session.Id,
                 c.Name,
                 furn,
                 bagSlot,
-                slot);
+                slot,
+                BagLocks.LockedBy(session, bagSlot) ?? "no such piece, stack or slot, an item kept out, or a used or extra amount");
             return ValueTask.CompletedTask;
         }
         var id = FreeId(c);
@@ -154,7 +159,9 @@ public sealed class HouseFurnitureHandlers(
             Count = stack.Count,
             Wear = stack.Wear,
             Insert = stack.Insert,
-            Fusion = stack.Fusion
+            Fusion = stack.Fusion,
+            Pose = stack.Pose,
+            BoxItem = stack.BoxItem
         };
         piece.Contents.Add(content);
         c.Bag.Remove(stack);
@@ -194,53 +201,23 @@ public sealed class HouseFurnitureHandlers(
         var piece = c.Furniture.Find(f => f.Index == furn);
         if (piece?.Contents.Find(x => x.Slot == slot) is not { } content)
             return ValueTask.CompletedTask;
-        var trial = c.Bag.Select(
-            b =>
-                new BagItem
-                {
-                    Slot = b.Slot,
-                    ItemId = b.ItemId,
-                    Count = b.Count,
-                    Wear = b.Wear,
-                    Insert = b.Insert,
-                    Fusion = b.Fusion,
-                    Pose = b.Pose,
-                    BoxItem = b.BoxItem
-                })
-            .ToList();
-        if (Bag.Add(trial, items, content.ItemId, content.Count, content.Wear, content.Insert, content.Fusion, content.Pose, content.BoxItem)
-            .Sum(x => x.Added) != content.Count)
+        if (Give(Bag.Trial(c.Bag), content).Sum(x => x.Added) != content.Count)
         {
             logger.LogInformation("[{Session}] {Name}: no room in the bag for cupboard {Furn} slot {Slot}", session.Id, c.Name, furn, slot);
             return ValueTask.CompletedTask;
         }
-        foreach (var (stack, added) in Bag.Add(
-            c,
-            items,
-            content.ItemId,
-            content.Count,
-            content.Wear,
-            content.Insert,
-            content.Fusion,
-            content.Pose,
-            content.BoxItem))
-            session.Send(
-                ItemMessages.BagAdd(
-                    new BagEntry
-                    {
-                        Slot = stack.Slot,
-                        ItemId = stack.ItemId,
-                        Count = added,
-                        Wear = stack.Wear,
-                        Insert = stack.Insert,
-                        FusionLevel = stack.Fusion,
-                        PoseItemId = stack.Pose,
-                        BoxItemId = stack.BoxItem
-                    }));
+        Bag.SendAdded(session, Give(c.Bag, content));
         piece.Contents.Remove(content);
         session.Send(HouseLifeMessages.CupboardRemove(furn, slot, content.Id));
         return ValueTask.CompletedTask;
     }
+
+    /// <summary>Adds the stack of a cupboard slot to a bag with every attribute the cupboard keeps.</summary>
+    /// <param name="bag">The bag, or a trial copy of it (<see cref="Bag.Trial"/>).</param>
+    /// <param name="content">The cupboard slot's stack.</param>
+    /// <returns>The stacks touched and the number added to each, as Bag.Add returns them.</returns>
+    private List<(BagItem Item, byte Added)> Give(List<BagItem> bag, CupboardItem content) =>
+        Bag.Add(bag, items, content.ItemId, content.Count, content.Wear, content.Insert, content.Fusion, content.Pose, content.BoxItem);
 
     /// <summary>Finds an unused cupboard content id.</summary>
     /// <param name="c">The character.</param>
@@ -277,6 +254,12 @@ public sealed class HouseFurnitureHandlers(
             var stack = body.Length >= 4 ? c.Bag.Find(b => b.Slot == body.Span[3]) : null;
             if (held is not null || stack is null || items[stack.ItemId] is not { } item || !BoxAccepts(kind, item))
                 return ValueTask.CompletedTask;
+            if ((BagLocks.LockedBy(session, stack.Slot) ?? (GridStore.IsPlain(stack) ? null : "a stack whose attributes a box does not keep")) is { } why)
+            {
+                logger.LogWarning("[{Session}] {Name}: box {Kind} slot {Slot} store of bag slot {Bag}: it is {Why}", session.Id, c.Name, kind, slot,
+                    stack.Slot, why);
+                return ValueTask.CompletedTask;
+            }
             c.HouseBoxes.Add(new BoxItem { Kind = kind, Slot = slot, ItemId = stack.ItemId, Count = stack.Count });
             c.Bag.Remove(stack);
             session.Send(ItemMessages.BagSlotDecrease(stack.Slot, stack.Count));
@@ -285,27 +268,12 @@ public sealed class HouseFurnitureHandlers(
         }
         if (held is null)
             return ValueTask.CompletedTask;
-        var trial = c.Bag.Select(
-            b =>
-                new BagItem
-                {
-                    Slot = b.Slot,
-                    ItemId = b.ItemId,
-                    Count = b.Count,
-                    Wear = b.Wear,
-                    Insert = b.Insert,
-                    Fusion = b.Fusion,
-                    Pose = b.Pose,
-                    BoxItem = b.BoxItem
-                })
-            .ToList();
-        if (Bag.Add(trial, items, held.ItemId, held.Count).Sum(x => x.Added) != held.Count)
+        if (Bag.Add(Bag.Trial(c.Bag), items, held.ItemId, held.Count).Sum(x => x.Added) != held.Count)
         {
             logger.LogInformation("[{Session}] {Name}: no room in the bag for box {Kind} slot {Slot}", session.Id, c.Name, kind, slot);
             return ValueTask.CompletedTask;
         }
-        foreach (var (stack, added) in Bag.Add(c, items, held.ItemId, held.Count))
-            session.Send(ItemMessages.BagAdd(new BagEntry { Slot = stack.Slot, ItemId = stack.ItemId, Count = added, Wear = stack.Wear }));
+        Bag.SendAdded(session, Bag.Add(c, items, held.ItemId, held.Count));
         c.HouseBoxes.Remove(held);
         session.Send(HouseLifeMessages.BoxSlotCleared(kind, slot));
         return ValueTask.CompletedTask;

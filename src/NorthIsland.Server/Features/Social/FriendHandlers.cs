@@ -14,6 +14,15 @@ public sealed class FriendHandlers(
     WorldState world,
     ILogger<FriendHandlers> logger)
 {
+    /// <summary>Longest mail text in characters, as the client's mail form allows (views/mail/SendMailWindow.xml).</summary>
+    public const int MaxMailText = 152;
+
+    /// <summary>Most mails that wait in the mailbox of an offline character; further mails are dropped until they log in.</summary>
+    public const int MaxMailbox = 100;
+
+    /// <summary>Shortest time between two mails of one session.</summary>
+    public static readonly TimeSpan MailWait = TimeSpan.FromSeconds(2);
+
     /// <summary>
     /// Sends the friend list on login: the GM center entry, every friend with fresh data and online state, tells friends the player is online, and
     /// delivers waiting mail.
@@ -78,7 +87,10 @@ public sealed class FriendHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Handles the answer to a friend request; on acceptance both players get each other as friends and are saved.</summary>
+    /// <summary>
+    /// Handles the answer to a friend request; on acceptance both players get each other as friends and are saved, under the requester's session
+    /// gate; a busy requester session refuses the acceptance as a full list would.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the requester's login id and the answer (1 yes, 2 no).</param>
     internal async ValueTask OnAnswer(GameSession session, ReadOnlyMemory<byte> body)
@@ -95,8 +107,37 @@ public sealed class FriendHandlers(
         session.Friends.PendingFrom = 0;
         if (world.SessionOf(requesterId) is not { } requester || requester.ActiveCharacter is not { } other)
             return;
+        if (!requester.TryExclusiveFrom(session, out var held)) // the requester's own packet may be changing or saving their list
+        {
+            logger.LogWarning("[{Session}] {Name}: friend answer to {Other} refused: the requester's session is busy", session.Id, character.Name,
+                other.Name);
+            session.Send(FriendMessages.ListFull()); // the answer the client gets when the friendship cannot be made
+            requester.Send(FriendMessages.ListFull());
+            return;
+        }
+        using (held)
+            await AnswerAsync(session, character, requester, other, answer).ConfigureAwait(false);
+    }
+
+    /// <summary>Carries out the answer to a friend request under the requester's session gate.</summary>
+    /// <param name="session">The answering player's session.</param>
+    /// <param name="character">The answering player's character.</param>
+    /// <param name="requester">The requester's session, whose gate the caller holds.</param>
+    /// <param name="other">The requester's character.</param>
+    /// <param name="answer">The answer: 1 yes, 2 no.</param>
+    /// <returns>A task that completes when both are saved.</returns>
+    private async Task AnswerAsync(GameSession session, Character character, GameSession requester, Character other, byte answer)
+    {
+        var requesterId = requester.Account!.LoginId;
         var myId = session.Account!.LoginId;
-        if (answer == 1 && !character.Friends.Exists(f => f.Id == requesterId))
+        if (answer == 1 && (character.Friends.Count >= FriendEntry.MaxFriends || other.Friends.Count >= FriendEntry.MaxFriends))
+        {
+            logger.LogWarning("[{Session}] {Name}: friend answer to {Other} refused, a friend list is full", session.Id, character.Name, other.Name);
+            session.Send(FriendMessages.ListFull());
+            requester.Send(FriendMessages.ListFull());
+            return;
+        }
+        if (answer == 1 && !character.Friends.Exists(f => f.Id == requesterId) && !other.Friends.Exists(f => f.Id == myId))
         {
             var mine = new FriendEntry { Id = requesterId };
             Refresh(mine, other);
@@ -113,7 +154,10 @@ public sealed class FriendHandlers(
             answer == 1 ? "yes" : answer == 2 ? "no" : "no answer");
     }
 
-    /// <summary>Handles deletion of a friend, removing the entry on both sides.</summary>
+    /// <summary>
+    /// Handles deletion of a friend, removing the entry on both sides; an online friend's list changes under their session gate, and a busy friend
+    /// session refuses the deletion.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the friend's login id.</param>
     internal async ValueTask OnDelete(GameSession session, ReadOnlyMemory<byte> body)
@@ -121,23 +165,48 @@ public sealed class FriendHandlers(
         if (InWorld(session) is not { } character || body.Length < 4)
             return;
         var friendId = BinaryPrimitives.ReadInt32LittleEndian(body.Span);
-        if (character.Friends.RemoveAll(f => f.Id == friendId) == 0)
+        if (!character.Friends.Exists(f => f.Id == friendId))
             return;
-        session.Send(FriendMessages.Removed(friendId));
-        var myId = session.Account!.LoginId;
-        if (await store.FindByLoginIdAsync(friendId).ConfigureAwait(false) is { } account)
+        var other = world.SessionOf(friendId);
+        var held = default(GameSession.Exclusive);
+        if (other is not null && !other.TryExclusiveFrom(session, out held)) // the friend's own packet may be changing or saving their list
         {
-            foreach (var c in account.Characters)
-                c.Friends.RemoveAll(f => f.Id == myId);
-            if (world.SessionOf(friendId) is { } other)
-                other.Send(FriendMessages.Removed(myId));
-            await store.SaveAsync(account).ConfigureAwait(false);
+            logger.LogWarning("[{Session}] {Name}: delete friend {Id} refused: the friend's session is busy", session.Id, character.Name, friendId);
+            return;
         }
-        await store.SaveAsync(session.Account).ConfigureAwait(false);
+        using (held)
+        {
+            character.Friends.RemoveAll(f => f.Id == friendId);
+            session.Send(FriendMessages.Removed(friendId));
+            var myId = session.Account!.LoginId;
+            if (await store.FindByLoginIdAsync(friendId).ConfigureAwait(false) is { } account)
+            {
+                foreach (var c in account.Characters)
+                    c.Friends.RemoveAll(f => f.Id == myId);
+                other?.Send(FriendMessages.Removed(myId));
+                await store.SaveAsync(account).ConfigureAwait(false);
+            }
+        }
+        await store.SaveAsync(session.Account!).ConfigureAwait(false);
         logger.LogInformation("[{Session}] {Name} deletes friend {Id}", session.Id, character.Name, friendId);
     }
 
-    /// <summary>Handles a mail to one or more players.</summary>
+    /// <summary>Takes the session's turn to send a mail: refused while <see cref="MailWait"/> has not passed since its last mail.</summary>
+    /// <param name="session">The sender's session.</param>
+    /// <returns>True when the session may send now; its last mail time is then set.</returns>
+    public static bool TakeMailTurn(GameSession session)
+    {
+        var now = GameClock.UtcNow;
+        if (now - session.Friends.LastMailUtc < MailWait)
+            return false;
+        session.Friends.LastMailUtc = now;
+        return true;
+    }
+
+    /// <summary>
+    /// Handles a mail to one or more friends: the text must fit the client's form, the session must have waited <see cref="MailWait"/> since its
+    /// last mail, and each recipient must be on the sender's friend list.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: a count, that many login ids, then the text.</param>
     internal async ValueTask OnMail(GameSession session, ReadOnlyMemory<byte> body)
@@ -148,12 +217,28 @@ public sealed class FriendHandlers(
         if (body.Length < 1 + 4 * count)
             return;
         var text = GameEncoding.GetString(body.Span[(1 + 4 * count)..]);
-        var targets = new int[count];
+        if (text.Length == 0 || text.Length > MaxMailText || count > FriendEntry.MaxFriends)
+        {
+            logger.LogWarning("[{Session}] {Name}: mail refused ({Count} recipients, {Length} characters)", session.Id, character.Name, count,
+                text.Length);
+            return;
+        }
+        if (!TakeMailTurn(session))
+        {
+            logger.LogWarning("[{Session}] {Name}: mail refused, sent too soon after the last one", session.Id, character.Name);
+            return;
+        }
+        var targets = new HashSet<int>();
         for (var i = 0; i < count; i++)
-            targets[i] = BinaryPrimitives.ReadInt32LittleEndian(body.Span[(1 + 4 * i)..]);
+            targets.Add(BinaryPrimitives.ReadInt32LittleEndian(body.Span[(1 + 4 * i)..]));
         var myId = session.Account!.LoginId;
         foreach (var targetId in targets)
         {
+            if (!character.Friends.Exists(f => f.Id == targetId))
+            {
+                logger.LogWarning("[{Session}] {Name}: mail to {Id}, who is not a friend", session.Id, character.Name, targetId);
+                continue;
+            }
             if (!await DeliverAsync(myId, targetId, text, session).ConfigureAwait(false))
             {
                 logger.LogWarning("[{Session}] {Name}: mail to unknown player {Id}", session.Id, character.Name, targetId);
@@ -165,13 +250,13 @@ public sealed class FriendHandlers(
 
     /// <summary>
     /// Delivers a mail: straight to an online player, or into the mailbox of the first character of an offline account. A block list entry refuses
-    /// it.
+    /// it, and a mailbox that holds <see cref="MaxMailbox"/> mails drops it.
     /// </summary>
     /// <param name="senderId">The sender's login id.</param>
     /// <param name="targetId">The recipient's login id.</param>
     /// <param name="text">The mail text.</param>
     /// <param name="sender">The sender's session; null skips the block check and the refusal message.</param>
-    /// <returns>False when the recipient does not exist, true otherwise (also when blocked).</returns>
+    /// <returns>False when the recipient does not exist, true otherwise (also when blocked or the mailbox is full).</returns>
     public async Task<bool> DeliverAsync(int senderId, int targetId, string text, GameSession? sender = null)
     {
         var time = GameClock.Now.ToOADate();
@@ -190,6 +275,11 @@ public sealed class FriendHandlers(
         if (sender is not null && BlocklistHandlers.Blocks(offline, senderId))
         {
             BlocklistHandlers.Refuse(sender, 2);
+            return true;
+        }
+        if (offline.Mailbox.Count >= MaxMailbox)
+        {
+            logger.LogWarning("Mail from {Sender} to {Target} dropped: the mailbox is full", senderId, targetId);
             return true;
         }
         offline.Mailbox.Add(new Mail { SenderId = senderId, Time = time, Text = text });

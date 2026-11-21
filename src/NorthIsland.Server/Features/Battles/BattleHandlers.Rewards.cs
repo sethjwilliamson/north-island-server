@@ -64,11 +64,15 @@ public sealed partial class BattleHandlers
     /// <summary>Milliseconds the item icons of a drop need to fly.</summary>
     private const int ItemFlyMs = 800;
 
-    /// <summary>Gives the drops of a fallen monster to the players who felled it, in the middle of the battle.</summary>
+    /// <summary>
+    /// Gives the drops of a fallen monster to the players who felled it, in the middle of the battle, each under the player's gate. A player whose
+    /// gate is busy gets the drop handed over (<see cref="GameSession.HandOver"/>): in the bag a moment later, without the thrown item.
+    /// </summary>
     /// <param name="battle">The battle.</param>
     /// <param name="monster">The monster.</param>
+    /// <param name="holder">The session whose gate the caller holds, or null when it holds none or cannot tell (the round's play).</param>
     /// <returns>True when at least one item was handed out and thrown on the field.</returns>
-    private bool GiveDropInBattle(Battle battle, Fighter monster)
+    private bool GiveDropInBattle(Battle battle, Fighter monster, GameSession? holder = null)
     {
         if (!options.Value.DropToKillingBlowOnly
             || battle.Standalone
@@ -93,29 +97,22 @@ public sealed partial class BattleHandlers
             foreach (var mine in felling.GroupBy(f => f.Session!))
             {
                 var session = mine.Key;
-                var character = session.ActiveCharacter!;
-                var times = mine.Count() * (regular && TimedEffects.DoubleDrop(character, TimedEffects.Now) ? 2 : 1);
-                var changes = Bag.Add(character, items, id, times);
-                var added = changes.Sum(c => c.Added);
-                if (added == 0)
+                var count = mine.Count();
+                if (!session.TryExclusiveNow(holder, out var held))
                 {
-                    logger.LogInformation(
-                        "[{Session}] {Name} gets no {Item} from {Monster} in battle: the bag is full",
-                        session.Id,
-                        character.Name,
-                        item.Name,
-                        monster.Name);
+                    session.HandOver(holder, "battle drop", () =>
+                    {
+                        if (AddDrop(session, monster, item, id, count, regular, table) is { } changes)
+                            Bag.SendObtained(session, items, id, changes);
+                    });
                     continue;
                 }
-                got.Add((session, changes));
-                logger.LogInformation(
-                    "[{Session}] {Name} gets {Item} x{Count} from {Monster} in battle{Table}",
-                    session.Id,
-                    character.Name,
-                    item.Name,
-                    added,
-                    monster.Name,
-                    table);
+                using (held)
+                {
+                    session.RunHandedOver(); // what was handed over to the player before comes first
+                    if (AddDrop(session, monster, item, id, count, regular, table) is { } changes)
+                        got.Add((session, changes));
+                }
             }
             if (got.Count == 0)
                 continue;
@@ -132,12 +129,54 @@ public sealed partial class BattleHandlers
         return thrown;
     }
 
-    /// <summary>Settles a won battle: pays experience to the players and their pets, ends the battle, then gives the rewards.</summary>
+    /// <summary>Puts one player's part of a monster's drop in their bag, during the battle; the caller holds the player's gate.</summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="monster">The monster that dropped it.</param>
+    /// <param name="item">The item's record.</param>
+    /// <param name="id">The item id.</param>
+    /// <param name="felled">How many of the player's fighters felled the monster: each gets a copy.</param>
+    /// <param name="regular">True for the monster's own drop, which a double drop doubles.</param>
+    /// <param name="table">The drop table's log label.</param>
+    /// <returns>The bag changes to send, or null when nothing went in (the bag is full, or the player left the game).</returns>
+    private List<(BagItem Item, byte Added)>? AddDrop(
+        GameSession session,
+        Fighter monster,
+        NorthIsland.GameData.Items.ItemRecord item,
+        ushort id,
+        int felled,
+        bool regular,
+        string table)
+    {
+        if (session.ActiveCharacter is not { } character)
+            return null;
+        var times = felled * (regular && TimedEffects.DoubleDrop(character, TimedEffects.Now) ? 2 : 1);
+        var changes = Bag.Add(character, items, id, times);
+        var added = changes.Sum(c => c.Added);
+        if (added == 0)
+        {
+            logger.LogInformation("[{Session}] {Name} gets no {Item} from {Monster} in battle: the bag is full", session.Id, character.Name,
+                item.Name, monster.Name);
+            return null;
+        }
+        logger.LogInformation("[{Session}] {Name} gets {Item} x{Count} from {Monster} in battle{Table}", session.Id, character.Name, item.Name,
+            added, monster.Name, table);
+        return changes;
+    }
+
+    /// <summary>
+    /// Settles a won battle: pays experience to the players and their pets, ends the battle, then gives the rewards; nothing happens when the
+    /// battle is already over, so two ends at nearly the same time pay once. What each winner earns is read from the battle now; it is paid
+    /// under the winner's gate (<see cref="GameSession.HandOver"/>, in order with their exit), as this may run under another player's gate or
+    /// none: the round's play runs on whichever thread finished the round's last command or deadline.
+    /// </summary>
     /// <param name="session">The session used for logging and for ending the battle.</param>
     /// <param name="battle">The battle.</param>
     /// <param name="winPlate">The fighter who used the Win Plate, or null.</param>
-    private void Win(GameSession session, Battle battle, Fighter? winPlate = null)
+    /// <param name="holder">The session whose gate the caller holds, or null when it holds none or cannot tell (the round's play).</param>
+    private void Win(GameSession session, Battle battle, Fighter? winPlate = null, GameSession? holder = null)
     {
+        if (!TryClaimEnd(battle))
+            return;
         var defeated = battle.Standalone ? []
             : battle.Monsters.Where(m => m.Npc is not null && !m.Captured).Select(m => m.Npc!).ToList();
         var o = options.Value;
@@ -153,69 +192,113 @@ public sealed partial class BattleHandlers
                 : (int)Math.Min(
                     int.MaxValue,
                     Math.Round(BattleFormulas.BurstDamageExp(battle.Monsters, f, level, o) * seasonalFactor, MidpointRounding.AwayFromZero));
-        List<(GameSession Session, Data.Pet Pet, int Exp)> earningPets = [];
-        List<(GameSession Session, int Exp)> shares = [];
-        foreach (var winner in winners)
+        // the fighters are found before Close takes the players out, which marks them left
+        List<WinShare> shares =
+        [
+            .. winners.Select(w => new WinShare(
+                w,
+                battle.Players.Find(p => ReferenceEquals(p.Session, w) && !p.Left),
+                battle.Pets.Find(p => ReferenceEquals(p.Session, w)) is { IsAlive: true, Left: false, OwnedPet: not null } pet ? pet : null,
+                DropsOf(w, battle, defeated)))
+        ];
+        // the rolls kept on a monster fighter are made here, on one thread: the winners' rewards may run at the same time on others
+        var seasonalDrops = calendar.Drops();
+        foreach (var drop in shares.SelectMany(w => w.Drops).Where(d => d.Monster is not null))
+            _ = DropRolls(drop, seasonalDrops);
+        foreach (var share in shares)
         {
-            var character = winner.ActiveCharacter!;
-            var playerFighter = battle.Players.Find(p => ReferenceEquals(p.Session, winner) && !p.Left);
-            var rawExp = Share(playerFighter, character.Level);
-            var exp = Seasonal(rawExp);
-            var own = character.ExpPausedSince is null
-                ? exp
-                    * BattleFormulas.CappedExpMultipliers(
-                        calendar.ExpMultiplier(),
-                        TimedEffects.ExpMultiplier(character, TimedEffects.Now),
-                        o.ExpMultiplierCap).Potion
-                : exp;
-            own += DamageBurst(playerFighter, character.Level);
-            // On the Training Island every living winner gets the flat amount on top, which events and potions do not raise
-            var flat = TrainingFlatExp(character, defeated);
+            share.Winner.HandOver(holder, "battle experience", () =>
+            {
+                if (share.Winner.ActiveCharacter is not { } character)
+                    return;
+                var winner = share.Winner;
+                var playerFighter = share.Player;
+                var rawExp = Share(playerFighter, character.Level);
+                var exp = Seasonal(rawExp);
+                var own = character.ExpPausedSince is null
+                    ? exp
+                        * BattleFormulas.CappedExpMultipliers(
+                            calendar.ExpMultiplier(),
+                            TimedEffects.ExpMultiplier(character, TimedEffects.Now),
+                            o.ExpMultiplierCap).Potion
+                    : exp;
+                own += DamageBurst(playerFighter, character.Level);
+                // On the Training Island every living winner who acted in the battle gets the flat amount on top, which events and potions do
+                // not raise; a pet gets it when it acted too
+                var islandFlat = TrainingFlatExp(character, defeated);
+                var flat = playerFighter is { Acted: true } ? islandFlat : 0;
 
-            (Data.Pet Pet, int Exp)? earns = null;
-            var buffShareBase = 0;
-            if (battle.Pets.Find(p => ReferenceEquals(p.Session, winner)) is { IsAlive: true, Left: false, OwnedPet: { } pet } petFighter)
-            {
-                // The owner's EXP potion works for the pet too, but not on bursting (combination damage) experience.
-                var petPotion = character.ExpPausedSince is null
-                    ? BattleFormulas.CappedExpMultipliers(calendar.ExpMultiplier(), TimedEffects.ExpMultiplier(character, TimedEffects.Now), o.ExpMultiplierCap)
-                        .Potion
-                    : 1;
-                var petShare = Seasonal(Share(petFighter, pet.Level));
-                var petBurst = DamageBurst(petFighter, pet.Level);
-                buffShareBase = petShare + petBurst;
-                // The pet gets the Training Island's flat amount on top as its owner does.
-                if ((int)Math.Min(int.MaxValue, Math.Round(petShare * petPotion)) + petBurst + flat is var petExp and > 0)
-                    earns = (pet, petExp);
-            }
-            if (earns is not null && playerFighter is { BuffedPet: true })
-                own += BattleFormulas.BuffShare(buffShareBase, o.BuffSharePercent);
-            own += flat;
-            // Without a running training state, a win on the Training Island gives no experience, to the player or to the pet.
-            if (TrainingIslandHandlers.IsUntrainedOnIsland(character))
-            {
-                own = 0;
-                earns = null;
-            }
-            character.Exp = (int)Math.Min(int.MaxValue, (long)character.Exp + (long)Math.Round(own));
-            shares.Add((winner, (int)Math.Round(own)));
-            winner.Send(InnMessages.SetAttribute(Action8.AttrExp, character.Exp));
-            experience.Notify(winner, (int)Math.Round(own));
-            if (earns is { } got)
-            {
-                got.Pet.Exp += got.Exp;
-                winner.Send(PetMessages.SetAttribute(got.Pet.Slot, Action8.AttrExp, got.Pet.Exp));
-                earningPets.Add((winner, got.Pet, got.Exp));
-            }
+                (Data.Pet Pet, int Exp)? earns = null;
+                var buffShareBase = 0;
+                if (share.Pet is { OwnedPet: { } pet } petFighter)
+                {
+                    // The owner's EXP potion works for the pet too, but not on bursting (combination damage) experience.
+                    var petPotion = character.ExpPausedSince is null
+                        ? BattleFormulas.CappedExpMultipliers(
+                            calendar.ExpMultiplier(),
+                            TimedEffects.ExpMultiplier(character, TimedEffects.Now),
+                            o.ExpMultiplierCap).Potion
+                        : 1;
+                    var petShare = Seasonal(Share(petFighter, pet.Level));
+                    var petBurst = DamageBurst(petFighter, pet.Level);
+                    buffShareBase = petShare + petBurst;
+                    // The pet gets the Training Island's flat amount on top as its owner does.
+                    var petFlat = petFighter.Acted ? islandFlat : 0;
+                    if ((int)Math.Min(int.MaxValue, Math.Round(petShare * petPotion)) + petBurst + petFlat is var petExp and > 0)
+                        earns = (pet, petExp);
+                }
+                if (earns is not null && playerFighter is { BuffedPet: true })
+                    own += BattleFormulas.BuffShare(buffShareBase, o.BuffSharePercent);
+                own += flat;
+                // Without a running training state, a win on the Training Island gives no experience, to the player or to the pet.
+                if (TrainingIslandHandlers.IsUntrainedOnIsland(character))
+                {
+                    own = 0;
+                    earns = null;
+                }
+                character.Exp = (int)Math.Min(int.MaxValue, (long)character.Exp + (long)Math.Round(own));
+                share.Exp = (int)Math.Round(own);
+                winner.Send(InnMessages.SetAttribute(Action8.AttrExp, character.Exp));
+                experience.Notify(winner, (int)Math.Round(own));
+                if (earns is { } got)
+                {
+                    got.Pet.Exp += got.Exp;
+                    winner.Send(PetMessages.SetAttribute(got.Pet.Slot, Action8.AttrExp, got.Pet.Exp));
+                    share.PetEarns = got;
+                }
+            });
         }
 
-        End(session, battle, BattleOutcome.Won, "won");
-        foreach (var winner in winners.Where(_ => !battle.Standalone))
-            instances.RecordWin(winner);
-        foreach (var (owner, pet, petExp) in earningPets)
-            PetGainsExp(owner, pet, petExp);
-        foreach (var (winner, exp) in shares)
-            Reward(winner, defeated, DropsOf(winner, battle, defeated), exp);
+        Close(session, battle, BattleOutcome.Won, "won", holder: holder);
+        foreach (var share in shares)
+        {
+            share.Winner.HandOver(holder, "battle rewards", () =>
+            {
+                if (!battle.Standalone)
+                    instances.RecordWin(share.Winner);
+                if (share.PetEarns is { } earned)
+                    PetGainsExp(share.Winner, earned.Pet, earned.Exp);
+                Reward(share.Winner, defeated, share.Drops, share.Exp);
+            });
+        }
+    }
+
+    /// <summary>What one winner of a battle earns: read from the battle when it is won, paid under the winner's gate.</summary>
+    /// <param name="Winner">The winner's session.</param>
+    /// <param name="Player">The winner's player fighter, or null when it left.</param>
+    /// <param name="Pet">The winner's pet fighter when it stands on the field at the end, or null.</param>
+    /// <param name="Drops">The drops the winner rolls for.</param>
+    private sealed record WinShare(
+        GameSession Winner,
+        Fighter? Player,
+        Fighter? Pet,
+        List<DropShare> Drops)
+    {
+        /// <summary>The experience the winner was paid, for the reward log; set by the experience work, which runs first.</summary>
+        public int Exp { get; set; }
+
+        /// <summary>The pet and the experience it was paid, or null; set by the experience work, which runs first.</summary>
+        public (Data.Pet Pet, int Exp)? PetEarns { get; set; }
     }
 
     /// <summary>Lists the drops a winner rolls for.</summary>
@@ -248,7 +331,7 @@ public sealed partial class BattleHandlers
     /// <param name="npc">The monster's record.</param>
     /// <returns>The item id, or null.</returns>
     private ushort? RollDrop(NorthIsland.GameData.Npcs.NpcRecord npc) =>
-        BattleFormulas.Drop(npc, options.Value.MonsterDropChancePercent, GameRandom.Shared, id => items[id]?.ShopColumn ?? 1);
+        BattleFormulas.Drop(npc, options.Value.MonsterDropChancePercent, GameRandom.Shared, id => items[id]?.ShopColumn ?? 1, options.Value.MaxDropRankGap);
 
     /// <summary>Rolls the item a monster drops from the seasonal event table, once per monster fighter.</summary>
     /// <param name="share">The drop.</param>
@@ -310,7 +393,7 @@ public sealed partial class BattleHandlers
         return monster.DropItem;
     }
 
-    /// <summary>The experience a win on the Training Island or in one of its areas adds for a living winner.</summary>
+    /// <summary>The experience a win on the Training Island or in one of its areas adds for a living winner who acted in the battle.</summary>
     /// <param name="character">The winner's character.</param>
     /// <param name="defeated">The records of the defeated monsters.</param>
     /// <returns>The flat experience, or 0 when it does not apply.</returns>
@@ -322,14 +405,18 @@ public sealed partial class BattleHandlers
             ? o.TrainingIslandFlatExp : 0;
     }
 
-    /// <summary>Gives a winner the results of a battle other than experience: monster book entries, levels and skills, gold and drops.</summary>
+    /// <summary>
+    /// Gives a winner the results of a battle other than experience: monster book entries, levels and skills, gold and drops. The caller holds
+    /// the winner's gate.
+    /// </summary>
     /// <param name="session">The winner's session.</param>
     /// <param name="defeated">The records of the defeated monsters.</param>
     /// <param name="dropFrom">The drops the winner rolls for.</param>
     /// <param name="exp">The experience the winner earned, for the log.</param>
     private void Reward(GameSession session, List<NorthIsland.GameData.Npcs.NpcRecord> defeated, List<DropShare> dropFrom, int exp)
     {
-        var character = session.ActiveCharacter!;
+        if (session.ActiveCharacter is not { } character)
+            return;
         MonsterBookHandlers.Record(session, character, defeated);
         experience.ApplyLevelUps(session, announceToSelf: false);
         foreach (var skill in skills.LearnCells(character))
@@ -362,51 +449,68 @@ public sealed partial class BattleHandlers
             exp, character.Exp, gold, dropped.Count > 0 ? ", drops: " + string.Join(", ", dropped) : "");
     }
 
-    /// <summary>Settles a lost battle: ends it and sends players back who were sent back or who lost in an arena.</summary>
+    /// <summary>
+    /// Settles a lost battle: ends it and sends players back who were sent back or who lost in an arena, under each player's gate after their
+    /// exit; nothing happens when the battle is already over.
+    /// </summary>
     /// <param name="session">The session used for logging and for ending the battle.</param>
     /// <param name="battle">The battle.</param>
-    private void Lose(GameSession session, Battle battle)
+    /// <param name="holder">The session whose gate the caller holds, or null when it holds none or cannot tell (the round's play).</param>
+    private void Lose(GameSession session, Battle battle, GameSession? holder = null)
     {
+        if (!TryClaimEnd(battle))
+            return;
         var losers = battle.ActivePlayers.Where(p => p.Session?.ActiveCharacter is not null).ToList();
 
-        End(session, battle, BattleOutcome.Lost, "defeated");
+        Close(session, battle, BattleOutcome.Lost, "defeated", holder: holder);
         foreach (var loser in losers)
         {
             var s = loser.Session!;
-            var character = s.ActiveCharacter!;
-            logger.LogInformation("[{Session}] {Name} is defeated: -{Exp} exp{SentBack}", s.Id, character.Name, loser.ExpLost,
-                loser.SentBack ? ", sent back to Starter's beach" : "");
-            if (EventArenas.IsArena(character.MapId))
-            {
-                var from = character.MapId;
-                marks.SendRemoved(s, EventArenas.SendBack(character));
-                character.MapId = from;
-                s.Event = null;
-                world.ChangeMap(s, EventArenas.Lobby);
-                continue;
-            }
-            if (!loser.SentBack)
-                continue;
-
-            s.Event = null;
-            world.ChangeMap(s, WorldHandlers.StartersBeach);
+            s.HandOver(holder, "battle defeat", () => SendBackLoser(s, loser)); // after the exit, which sets the experience lost
         }
+    }
+
+    /// <summary>
+    /// Sends a defeated player back when they lost in an arena or were sent back to Starter's beach; the caller holds the player's gate.
+    /// </summary>
+    /// <param name="s">The player's session.</param>
+    /// <param name="loser">The player fighter.</param>
+    private void SendBackLoser(GameSession s, Fighter loser)
+    {
+        if (s.ActiveCharacter is not { } character)
+            return;
+        logger.LogInformation("[{Session}] {Name} is defeated: -{Exp} exp{SentBack}", s.Id, character.Name, loser.ExpLost,
+            loser.SentBack ? ", sent back to Starter's beach" : "");
+        if (EventArenas.IsArena(character.MapId))
+        {
+            var from = character.MapId;
+            marks.SendRemoved(s, EventArenas.SendBack(character));
+            character.MapId = from;
+            s.Event = null;
+            world.ChangeMap(s, EventArenas.Lobby);
+            return;
+        }
+        if (!loser.SentBack)
+            return;
+
+        s.Event = null;
+        world.ChangeMap(s, WorldHandlers.StartersBeach);
     }
 
     /// <summary>The item id of the Toy Puppet.</summary>
     public const ushort ToyPuppet = 34071; // Toy Puppet
 
-    /// <summary>Uses up a Toy Puppet when a player or their pet ends the battle down, so the losses are not taken.</summary>
+    /// <summary>Uses up a Toy Puppet when a player ends the battle down or one of their pets fell in it, so the losses are not taken.</summary>
     /// <param name="session">The player's session.</param>
     /// <param name="player">The player fighter.</param>
-    /// <param name="pet">The player's pet fighter, or null.</param>
+    /// <param name="fallenPets">The player's pet fighters that fell in the battle.</param>
     /// <returns>True when a puppet was used up.</returns>
-    private bool UseToyPuppet(GameSession session, Fighter player, Fighter? pet)
+    private bool UseToyPuppet(GameSession session, Fighter player, List<Fighter> fallenPets)
     {
         if (session.ActiveCharacter is not { } character || EventArenas.IsArena(character.MapId))
             return false;
-        var fallenPet = pet is { IsAlive: false, OwnedPet: { LeaseUntil: null } p } ? p : null;
-        if (fallenPet is null && (player.IsAlive || TimedEffects.ExpProtected(character, TimedEffects.Now)))
+        List<Data.Pet> owned = [.. fallenPets.Select(f => f.OwnedPet).OfType<Data.Pet>().Where(p => p.LeaseUntil is null)];
+        if (owned.Count == 0 && (player.IsAlive || TimedEffects.ExpProtected(character, TimedEffects.Now)))
             return false;
         if (character.Equipment.Find(e => e.ItemId == ToyPuppet) is { } worn)
         {
@@ -415,8 +519,9 @@ public sealed partial class BattleHandlers
             session.Send(ItemMessages.EquipSlotCleared(worn.Slot));
             world.Broadcast(session, ItemMessages.PlayerEquipChange(session.Account!.LoginId, worn.ItemId, on: false), sameMapOnly: false);
         }
-        else if (fallenPet?.Equipment.Find(e => e.ItemId == ToyPuppet) is { } petWorn)
+        else if (owned.Find(p => p.Equipment.Exists(e => e.ItemId == ToyPuppet)) is { } fallenPet)
         {
+            var petWorn = fallenPet.Equipment.Find(e => e.ItemId == ToyPuppet)!;
             fallenPet.Equipment.Remove(petWorn);
             session.Send(PetMessages.EquipCleared(fallenPet.Slot, petWorn.Slot));
         }

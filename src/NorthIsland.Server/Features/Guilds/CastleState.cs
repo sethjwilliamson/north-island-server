@@ -8,4 +8,7 @@ public sealed class CastleState
 
     /// <summary>A time value saved with the state; the server does not read or write it.</summary>
     public double Since { get; set; }
+
+    /// <summary>The ISO week (year * 100 + week) in which each account last took the weekly castle reward, by login id.</summary>
+    public Dictionary<int, int> RewardWeeks { get; set; } = [];
 }

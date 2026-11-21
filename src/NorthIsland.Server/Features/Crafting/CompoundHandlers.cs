@@ -123,7 +123,7 @@ public sealed class CompoundHandlers(
                 if (result.Product.ShopColumn > materials.Min(m => m.ShopColumn)) // only a result above the lowest material counts as a success
                     lifeSkills.Train(session, SkillTrained(sub, character));
                 break;
-            case AlchemyOutcome.Degraded when Alchemy.Degraded(records[0], items.All) is { } lower: // degraded with a lower item: it replaces the main material
+            case AlchemyOutcome.Degraded when Alchemy.Degraded(records[0], items.All, Roll) is { } lower: // degraded with a random lower item: it replaces the main material
                 if (!Replace(session, character, stacks!, lower.Id))
                     return NoRoom(session, character, names);
                 result = result with { Product = lower };

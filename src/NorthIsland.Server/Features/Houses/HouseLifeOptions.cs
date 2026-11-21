@@ -3,7 +3,10 @@ namespace NorthIsland.Server.Features.Houses;
 /// <summary>The numbers for life in the house: mailbox size, tent limits, the Spa Bun, baths, training and the Magic Sandglass.</summary>
 public sealed class HouseLifeOptions
 {
-    /// <summary>The most letters a Mailbox keeps for an offline player; 0 means no limit.</summary>
+    /// <summary>
+    /// The most letters a character's Mailbox keeps, as a count of letters; 0 or less uses <see cref="FurMailHandlers.DefaultCapacity"/> (100
+    /// letters), since a box without a limit could be filled without end.
+    /// </summary>
     public int FurMailCapacity { get; set; }
 
     /// <summary>The most tents on one map; 0 means no limit.</summary>
@@ -11,6 +14,15 @@ public sealed class HouseLifeOptions
 
     /// <summary>The most tents on the server; 0 means no limit.</summary>
     public int TentsPerServer { get; set; }
+
+    /// <summary>
+    /// The farthest a player may stand from a tent, in pixels across, to go in by clicking it. The client sends the click from anywhere on its
+    /// 800 by 600 pixel game screen without walking up, so the default is the screen width; 0 means no limit.
+    /// </summary>
+    public int TentReachX { get; set; } = 800;
+
+    /// <summary>The farthest a player may stand from a tent, in pixels up or down, to go in by clicking it: by default the screen height; 0 means no limit.</summary>
+    public int TentReachY { get; set; } = 600;
 
     /// <summary>Minutes of bath boost one Spa Bun gives.</summary>
     public int SpaBunMinutes { get; set; } = 30;

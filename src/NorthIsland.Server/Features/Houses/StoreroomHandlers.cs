@@ -154,7 +154,10 @@ public sealed class StoreroomHandlers(
         session.Send(w.U16(furn).ToArray());
     }
 
-    /// <summary>Puts a bag stack, or part of it, into a storeroom cell; the vehicle being ridden and flagged items stay out.</summary>
+    /// <summary>
+    /// Puts a bag stack, or part of it, into a storeroom cell; a locked bag slot (<see cref="BagLocks"/>: in a trade, a stall, a house shelf,
+    /// the pet express or the vehicle being ridden) and flagged items stay out.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="c">The player's active character.</param>
     /// <param name="bagSlot">The bag slot to take from.</param>
@@ -168,8 +171,13 @@ public sealed class StoreroomHandlers(
         byte count)
     {
         var stack = c.Bag.Find(b => b.Slot == bagSlot);
-        if (stack is null || session.Vehicle?.BagSlot == bagSlot || (items[stack.ItemId]?.Flags & NoStoreFlag) != 0)
+        if (stack is null || (items[stack.ItemId]?.Flags & NoStoreFlag) != 0)
             return;
+        if (BagLocks.LockedBy(session, bagSlot) is { } locked)
+        {
+            logger.LogWarning("[{Session}] {Name}: storeroom put of bag slot {Bag}: it is {Why}", session.Id, c.Name, bagSlot, locked);
+            return;
+        }
         var want = (byte)Math.Min(count, stack.Count);
         if (Place(c.Storeroom, stack, cell, want) is not { } placed)
         {
@@ -183,7 +191,10 @@ public sealed class StoreroomHandlers(
         session.Send(Added(placed.Stack, placed.Moved));
     }
 
-    /// <summary>Takes a storeroom stack, or part of it, into the bag, at the wanted cell or else wherever it fits.</summary>
+    /// <summary>
+    /// Takes a storeroom stack, or part of it, into the bag, at the wanted cell or else wherever it fits; a locked bag stack (<see cref="BagLocks"/>)
+    /// is never added onto.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="c">The player's active character.</param>
     /// <param name="cell">The storeroom cell to take from.</param>
@@ -201,7 +212,7 @@ public sealed class StoreroomHandlers(
             return;
         var want = (byte)Math.Min(count, stack.Count);
         var trial = c.Bag.Select(b => Copy(b, b.Slot, b.Count)).ToList();
-        var placed = Place(trial, stack, bagCell, want);
+        var placed = BagLocks.IsLocked(session, bagCell) ? null : Place(trial, stack, bagCell, want);
         if (placed is null)
         {
             var anywhere = Bag.FreeSlot(trial, items, stack.ItemId);

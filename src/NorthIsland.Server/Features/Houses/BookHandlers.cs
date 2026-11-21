@@ -65,8 +65,13 @@ public sealed class BookHandlers(
         var (bagSlot, slot) = (body.Span[0], body.Span[1]);
         var stack = c.Bag.Find(b => b.Slot == bagSlot);
         var held = Slot(c, desk);
-        if (stack is null || slot is < 1 or > Slots || held[slot - 1] != 0 || items[stack.ItemId]?.SubType != 103 || session.Vehicle?.BagSlot == bagSlot)
+        if (stack is null || slot is < 1 or > Slots || held[slot - 1] != 0 || items[stack.ItemId]?.SubType != 103) // 103: the blueprint sub type
             return ValueTask.CompletedTask;
+        if (BagLocks.LockedBy(session, bagSlot) is { } locked)
+        {
+            logger.LogWarning("[{Session}] {Name}: blueprint from bag slot {Slot}: it is {Why}", session.Id, c.Name, bagSlot, locked);
+            return ValueTask.CompletedTask;
+        }
         held[slot - 1] = stack.ItemId;
         stack.Count--;
         if (stack.Count == 0)

@@ -2,6 +2,7 @@ using System.Collections.Frozen;
 using System.Collections.Immutable;
 using Microsoft.Extensions.Logging;
 using NorthIsland.Protocol.IO;
+using NorthIsland.Protocol.Messages.Items;
 using NorthIsland.Protocol.Opcodes;
 
 namespace NorthIsland.Server.Features.Houses;
@@ -48,7 +49,8 @@ public sealed class MaidHandlers(
     }
 
     /// <summary>
-    /// Handles the maid's menu orders: the bank (<c>76/1</c>), the pet storage (<c>76/2</c>) and the change of clothes (<c>76/3</c>).
+    /// Handles the maid's menu orders: the bank (<c>76/1</c>), the pet storage (<c>76/2</c>) and the change of clothes (<c>76/3</c>). The bank
+    /// and the pet storage are recorded as open on the house map (<see cref="OpenServices"/>), which serves their requests.
     /// </summary>
     /// <param name="session">The session.</param>
     /// <param name="body">The maid's furniture index, and for the change of clothes the choice and the bag slot of the suit.</param>
@@ -65,10 +67,12 @@ public sealed class MaidHandlers(
         switch (kind)
         {
             case Action76.Bank: // 76/1: open the bank
+                OpenServices.Open(session, c, ServiceWindow.BankItems);
                 BankHandlers.SendItems(session, c);
                 session.Send(new PacketWriter(Action76.Code, Action76.Bank).ToArray());
                 break;
             case Action76.Pets: // 76/2: open the pet storage
+                OpenServices.Open(session, c, ServiceWindow.PetStorage);
                 storage.SendState(session, c);
                 session.Send(new PacketWriter(Action76.Code, Action76.Pets).ToArray());
                 break;
@@ -79,7 +83,10 @@ public sealed class MaidHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Changes the maid into a costume if the owner has the suit in the bag; otherwise closes the maid's window.</summary>
+    /// <summary>
+    /// Changes the maid into a costume if the owner has the suit in the bag, using one suit up; otherwise closes the maid's window. The piece
+    /// becomes the costume's maid item, as the client shows it, so taking it back gives that item.
+    /// </summary>
     /// <param name="session">The owner's session.</param>
     /// <param name="c">The player's character.</param>
     /// <param name="owner">The owner of the house.</param>
@@ -94,11 +101,18 @@ public sealed class MaidHandlers(
     {
         var (choice, bagSlot) = body.Length >= 3 ? (body[1], body[2]) : ((byte)255, (byte)0);
         if (!ReferenceEquals(owner.Character, c) || !Costumes.TryGetValue(choice, out var costume)
-            || c.Bag.Find(b => b.Slot == bagSlot) is not { } suit || suit.ItemId != costume.Suit || piece.ItemId == costume.Maid)
+            || c.Bag.Find(b => b.Slot == bagSlot) is not { } suit || suit.ItemId != costume.Suit || piece.ItemId == costume.Maid
+            || BagLocks.IsLocked(session, bagSlot))
         {
+            logger.LogWarning("[{Session}] {Name}: maid {Furn} costume {Choice} from bag slot {Slot}: refused ({Why})", session.Id, c.Name,
+                piece.Index, choice, bagSlot, BagLocks.LockedBy(session, bagSlot) ?? "not the owner, no such costume or suit, or already worn");
             session.Send(new PacketWriter(Action76.Code, Action76.Hide).ToArray());
             return;
         }
+        suit.Count--;
+        if (suit.Count == 0)
+            c.Bag.Remove(suit);
+        session.Send(ItemMessages.BagSlotDecrease(suit.Slot, 1));
         piece.ItemId = costume.Maid;
         session.Send(new PacketWriter(Action76.Code, Action76.Costume).U8((byte)piece.Index).U16(costume.Maid).ToArray());
         logger.LogInformation("[{Session}] {Name}: the maid {Furn} changes into {Item}", session.Id, c.Name, piece.Index, costume.Maid);

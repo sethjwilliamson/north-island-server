@@ -45,8 +45,13 @@ public sealed class GasHandlers(
             foreach (var slot in body.Span.ToArray().Distinct())
             {
                 var stack = c.Bag.Find(b => b.Slot == slot && b.ItemId == Gas);
-                if (stack is null || fuel + stored >= capacity || session.Vehicle?.BagSlot == slot)
+                if (stack is null || fuel + stored >= capacity)
                     continue;
+                if (BagLocks.LockedBy(session, slot) is { } locked)
+                {
+                    logger.LogWarning("[{Session}] {Name}: gas from bag slot {Slot}: it is {Why}", session.Id, c.Name, slot, locked);
+                    continue;
+                }
                 var put = Math.Min((int)stack.Count, capacity - fuel - stored);
                 stack.Count -= (byte)put;
                 if (stack.Count == 0)

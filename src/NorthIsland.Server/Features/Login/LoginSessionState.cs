@@ -8,4 +8,9 @@ public sealed class LoginSessionState
 
     /// <summary>The name accepted by the last name check, or null when none is pending.</summary>
     public string? PendingName { get; set; }
+
+    /// <summary>
+    /// The logins this connection got refused; it is closed once they reach <see cref="ServerOptions.LoginFailuresPerConnection"/>.
+    /// </summary>
+    public int FailedLogins { get; set; }
 }

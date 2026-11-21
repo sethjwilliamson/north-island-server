@@ -20,6 +20,12 @@ public sealed class Trade(
     /// <summary>Whether the trade has ended and must not change any more.</summary>
     public bool Closed { get; set; }
 
+    /// <summary>
+    /// Whether a confirmation found both sides confirmed and that packet carries the trade out; a later confirmation leaves it alone, so that
+    /// only one of the two players' packets takes the other's session gate.
+    /// </summary>
+    public bool Settling { get; set; }
+
     /// <summary>Whether this is a large-item trade, which uses its own packets.</summary>
     public bool Large { get; init; }
 

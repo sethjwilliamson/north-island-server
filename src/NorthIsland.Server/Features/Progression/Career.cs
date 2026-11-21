@@ -32,6 +32,12 @@ public static class Career
     /// <summary>Id of the quest mark that records the rebirth trial; it is removed from the character on rebirth.</summary>
     public const ushort TrialMark = 15090; // First Trial
 
+    /// <summary>
+    /// Count of the trial mark once the rebirth trial is done: the trial NPCs open the career form only at this count (events 3 and 4 of map
+    /// 12625), and a rebirth needs at least this count.
+    /// </summary>
+    public const byte TrialDone = 12;
+
     /// <summary>Id of the mark flag set on a character once the rebirth trial is done.</summary>
     public const ushort TrialFlag = 15091; // First Trial
 

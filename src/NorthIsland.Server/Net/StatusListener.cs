@@ -6,13 +6,20 @@ using Microsoft.Extensions.Options;
 
 namespace NorthIsland.Server.Net;
 
-/// <summary>Background service that answers every connection on the status port with the server's status record and closes it.</summary>
+/// <summary>
+/// Background service that answers every connection on the status port with the server's status record and closes it. It logs at most one
+/// line per <see cref="LogEveryMs"/>, which counts the requests answered since the line before, so that a flood of status requests cannot
+/// flood the log.
+/// </summary>
 /// <param name="options">The server options.</param>
 /// <param name="logger">Logger for the handler's messages.</param>
 public sealed class StatusListener(
     IOptions<ServerOptions> options,
     ILogger<StatusListener> logger) : BackgroundService
 {
+    /// <summary>The milliseconds between two log lines about answered status requests.</summary>
+    public const long LogEveryMs = 60_000; // one minute
+
     /// <summary>The server options.</summary>
     private readonly ServerOptions _options = options.Value;
 
@@ -38,6 +45,8 @@ public sealed class StatusListener(
         _bound.TrySetResult((IPEndPoint)listener.LocalEndpoint);
         logger.LogInformation("Status server listening on {Endpoint}", listener.LocalEndpoint);
         var record = BuildRecord(_options.ServerId, _options.ServerStatus);
+        var loggedAtMs = Environment.TickCount64 - LogEveryMs; // the first answer is logged at once
+        var unlogged = 0; // the requests answered since the latest line
 
         try
         {
@@ -58,8 +67,17 @@ public sealed class StatusListener(
                 {
                     await client.GetStream().WriteAsync(record, stoppingToken).ConfigureAwait(false);
                     client.Client.Shutdown(SocketShutdown.Send);
-                    logger.LogInformation("Status sent to {Remote}: server {Id} status {Status}",
-                        client.Client.RemoteEndPoint, _options.ServerId, _options.ServerStatus);
+                    var now = Environment.TickCount64;
+                    if (now - loggedAtMs < LogEveryMs)
+                    {
+                        unlogged++;
+                    }
+                    else
+                    {
+                        logger.LogInformation("Status sent to {Remote}: server {Id} status {Status} ({Count} more answered since the latest line)",
+                            client.Client.RemoteEndPoint, _options.ServerId, _options.ServerStatus, unlogged);
+                        (loggedAtMs, unlogged) = (now, 0);
+                    }
                 }
                 catch (Exception ex) when (ex is IOException or SocketException)
                 {

@@ -13,6 +13,7 @@ namespace NorthIsland.Server.Features.Items;
 /// throwing gold, and using items.
 /// </summary>
 /// <param name="items">Item definitions.</param>
+/// <param name="npcs">NPC definitions, for the career pets that may wear the gear of the pet they grew from.</param>
 /// <param name="world">The online players, to show equipment changes to others.</param>
 /// <param name="ground">The items on the ground of each map.</param>
 /// <param name="bottles">The bottle handlers, for pouring a potion into a bottle by moving it.</param>
@@ -24,6 +25,7 @@ namespace NorthIsland.Server.Features.Items;
 /// <param name="logger">Logger.</param>
 public sealed class ItemHandlers(
     ItemData items,
+    NpcData npcs,
     WorldState world,
     GroundItems ground,
     BottleHandlers bottles,
@@ -102,14 +104,31 @@ public sealed class ItemHandlers(
             logger.LogWarning("[{Session}] equip from bag slot {Slot}: no equipment there", session.Id, bagSlot);
             return ValueTask.CompletedTask;
         }
+        if (BagLocks.LockedBy(session, bagSlot) is { } locked)
+        {
+            logger.LogWarning("[{Session}] equip from bag slot {Slot}: {Item} is {Why}", session.Id, bagSlot, bagItem.ItemId, locked);
+            return ValueTask.CompletedTask;
+        }
         if (record!.RequiredLevel > character.Level)
         {
             logger.LogWarning("[{Session}] {Name} (level {Level}) cannot wear {Item}, needs level {Required}",
                 session.Id, character.Name, character.Level, bagItem.ItemId, record.RequiredLevel);
             return ValueTask.CompletedTask;
         }
+        if (!CanWear(record, character))
+        {
+            logger.LogWarning("[{Session}] {Name} (body type {Body}, element {Element}) cannot wear {Item}: usable by {UsableBy}, pet {Pet}",
+                session.Id, character.Name, character.BodyType, character.Element, bagItem.ItemId, record.UsableBy, record.PetNpcId);
+            return ValueTask.CompletedTask;
+        }
 
         var worn = character.Equipment.Find(e => e.Slot == equipSlot);
+        if (worn is not null && !FitsInPlace(character, bagItem, worn.ItemId))
+        {
+            logger.LogWarning("[{Session}] equip from bag slot {Slot}: the worn {Worn} does not fit back into the slot of {Item}", session.Id,
+                bagSlot, worn.ItemId, bagItem.ItemId);
+            return ValueTask.CompletedTask;
+        }
         TakeFromBag(character, bagItem, 1);
         if (worn is not null)
         {
@@ -220,12 +239,20 @@ public sealed class ItemHandlers(
         var pet = character.Pets.Find(p => p.Slot == petSlot);
         var stack = character.Bag.Find(b => b.Slot == bagSlot);
         var item = stack is null ? null : items[stack.ItemId];
-        if (pet is null || stack is null || item is not { IsEquipment: true } || item.RequiredLevel > pet.Level)
+        if (pet is null || stack is null || item is null)
         {
             logger.LogWarning("[{Session}] pet equip: pet slot {Pet}, bag slot {Bag} refused", session.Id, petSlot, bagSlot);
             return ValueTask.CompletedTask;
         }
         var old = pet.Equipment.Find(e => e.Slot == item.EquipSlot);
+        var refusal = BagLocks.LockedBy(session, bagSlot) ?? PetWearRefusal(session, item, pet)
+            ?? (old is not null && !FitsInPlace(character, stack, old.ItemId) ? $"the worn {old.ItemId} does not fit back into the bag slot" : null);
+        if (refusal is not null)
+        {
+            logger.LogWarning("[{Session}] pet equip: pet {Pet} (slot {PetSlot}), {Item} from bag slot {Bag} refused: {Why}", session.Id,
+                pet.Name, petSlot, item.Id, bagSlot, refusal);
+            return ValueTask.CompletedTask;
+        }
         TakeFromBag(character, stack, 1);
         if (old is not null)
         {
@@ -253,7 +280,10 @@ public sealed class ItemHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Handles taking a piece off a pet into the bag, the wanted slot if it fits and otherwise a free one.</summary>
+    /// <summary>
+    /// Handles taking a piece off a pet into the bag, the wanted slot if it fits and otherwise a free one, unless the pet's gear is locked (see
+    /// <see cref="GearLocked"/>) or the pet is a soldier (mercenary), as the client's petUnequipRefusal.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the pet slot, the equipment slot and the wanted bag slot.</param>
     internal ValueTask OnPetUnequip(GameSession session, ReadOnlyMemory<byte> body)
@@ -263,6 +293,11 @@ public sealed class ItemHandlers(
         var (petSlot, equipSlot, wanted) = (body.Span[0], body.Span[1], body.Span[2]);
         if (character.Pets.Find(p => p.Slot == petSlot) is not { } pet || pet.Equipment.Find(e => e.Slot == equipSlot) is not { } worn)
             return ValueTask.CompletedTask;
+        if ((GearLocked(session, pet) ?? (IsMercenary(pet) ? SoldierGear : null)) is { } locked)
+        {
+            logger.LogWarning("[{Session}] pet unequip: pet {Pet} (slot {PetSlot}) refused: {Why}", session.Id, pet.Name, petSlot, locked);
+            return ValueTask.CompletedTask;
+        }
         var bagSlot = Bag.Fits(character, items, worn.ItemId, wanted) ? wanted : Bag.FreeSlot(character, items, worn.ItemId);
         if (bagSlot == 0)
             return ValueTask.CompletedTask;
@@ -287,7 +322,7 @@ public sealed class ItemHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Handles destroying a piece a pet wears.</summary>
+    /// <summary>Handles destroying a piece a pet wears, unless the pet's gear is locked (see <see cref="GearLocked"/>).</summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the pet slot and the equipment slot.</param>
     internal ValueTask OnPetDiscardEquipped(GameSession session, ReadOnlyMemory<byte> body)
@@ -297,6 +332,11 @@ public sealed class ItemHandlers(
         var (petSlot, equipSlot) = (body.Span[0], body.Span[1]);
         if (character.Pets.Find(p => p.Slot == petSlot) is not { } pet || pet.Equipment.Find(e => e.Slot == equipSlot) is not { } worn)
             return ValueTask.CompletedTask;
+        if (GearLocked(session, pet) is { } locked)
+        {
+            logger.LogWarning("[{Session}] pet discard equipped: pet {Pet} (slot {PetSlot}) refused: {Why}", session.Id, pet.Name, petSlot, locked);
+            return ValueTask.CompletedTask;
+        }
         pet.Equipment.Remove(worn);
         combat.SendPetBonuses(session, pet);
         session.Send(PetMessages.EquipCleared(petSlot, equipSlot));
@@ -307,10 +347,138 @@ public sealed class ItemHandlers(
         return ValueTask.CompletedTask;
     }
 
+    /// <summary>The element id of Wind, the only element some gear asks for.</summary>
+    private const byte WindElement = 4;
+
+    /// <summary>The item sub type of pet career gear, which a career pet may wear when it was made for the pet it grew from.</summary>
+    private const byte CareerGearSubType = 149;
+
+    /// <summary>The equipment slot of the plasma weapons of the Elin pets.</summary>
+    private const byte ElinWeaponSlot = 3;
+
+    /// <summary>The NPC ids of the Elin pet and the reborn Elin pet, which wear only their own plasma weapons.</summary>
+    private const ushort ElinPet = 14230, RebornElinPet = 31029; // 14230 Elin, 31029 Elin (reborn)
+
+    /// <summary>The plasma weapons of the Elin pet and of the reborn Elin pet.</summary>
+    private static readonly ushort[] ElinWeapons = [20044, 20045], RebornElinWeapons = [20048]; // 20044 Plasma Gun, 20045 and 20048 Plasma Wafer
+
+    /// <summary>The saddles, which pets of every direction kind but 0 may wear whoever they are for (the client's IsGetSaddleKind).</summary>
+    // 25208 Swift, 25214 Comfortable, 25535 Bash, 25536 Magic, 25539 Defence, 25625 Spirit, 25540 Decelerate, 25641 Tenacity
+    private static readonly ushort[] Saddles = [25208, 25214, 25535, 25536, 25539, 25625, 25540, 25641];
+
+    /// <summary>The career pets by NPC id, with the NPC id of the pet each grew from.</summary>
+    private static readonly Dictionary<ushort, ushort> CareerBases = new()
+    {
+        [31027] = 14156, // Xaolan
+        [31026] = 14081, // Niss
+        [31025] = 14162, // Roca
+        [31028] = 14175, // Clive
+        [31035] = 14615, // Qlaya
+        [31037] = 12068, // Magellan
+        [31034] = 14609, // Shasha
+        [31029] = 14230, // Elin
+        [31040] = 15689, // Hayate
+        [31033] = 14548, // Kanako
+        [31038] = 12095, // Frederico
+        [31039] = 15657, // Victoria
+        [31032] = 14274, // Sam
+    };
+
+    /// <summary>
+    /// Whether the player's body type and element let them wear an item and the item is not pet gear (the client's canWear): usable by 1 body types
+    /// 1 and 3, 2 body types 2 and 4, 4 to 7 body type 1 to 4, 12 the Wind element, 8, 9 and 13 pets only, anything else anyone.
+    /// </summary>
+    /// <param name="item">The item.</param>
+    /// <param name="character">The player's character.</param>
+    /// <returns>True when the player may wear it.</returns>
+    private static bool CanWear(NorthIsland.GameData.Items.ItemRecord item, Character character) =>
+        item.PetNpcId == 0 && item.UsableBy switch
+        {
+            1 => character.BodyType is 1 or 3,
+            2 => character.BodyType is 2 or 4,
+            >= 4 and <= 7 => character.BodyType == item.UsableBy - 3, // 4 to 7: body type 1 to 4
+            12 => character.Element == WindElement,
+            8 or 9 or 13 => false,
+            _ => true
+        };
+
+    /// <summary>
+    /// Tells why a pet may not wear an item (the client's petEquipRefusal): its level, a soldier (mercenary) pet, who the item is for (gear usable
+    /// by 9 or 10 fits pets of direction kind 0, by 11 or 13 pets of direction kind 1, and a saddle any pet whose direction kind is not 0), the Elin
+    /// pets' own weapons, a pet up for sale in the stall or offered in a pet trade, a quest pet, a piece that is not equipment or one marked not
+    /// for pets. As in the client, a soldier pet may still put on gear made for its own NPC.
+    /// </summary>
+    /// <param name="session">The owner's session.</param>
+    /// <param name="item">The item.</param>
+    /// <param name="pet">The pet.</param>
+    /// <returns>The reason for the log, or null when the pet may wear it.</returns>
+    private string? PetWearRefusal(GameSession session, NorthIsland.GameData.Items.ItemRecord item, Pet pet)
+    {
+        if (item.PetNpcId == 0)
+        {
+            if (item.RequiredLevel > pet.Level)
+                return $"needs level {item.RequiredLevel}, the pet is level {pet.Level}";
+            if (IsMercenary(pet))
+                return SoldierGear;
+            var directionKind = npcs[pet.NpcId]?.DirectionKind ?? 0; // an unknown NPC counts as direction kind 0, as the client's empty record
+            var fits = item.UsableBy switch
+            {
+                0 or 8 => true, // any pet
+                9 or 10 => directionKind == 0, // pets of direction kind 0
+                11 or 13 => directionKind == 1, // pets of direction kind 1
+                12 => pet.Element == WindElement,
+                _ => false // not for pets
+            } || (Saddles.Contains(item.Id) && directionKind != 0);
+            if (!fits)
+                return $"usable by {item.UsableBy}";
+        }
+        else if (item.PetNpcId != pet.NpcId
+                 && !(item.SubType == CareerGearSubType && CareerBases.TryGetValue(pet.NpcId, out var grewFrom) && grewFrom == item.PetNpcId
+                      && npcs[grewFrom] is { GrowKey: not 0 }))
+            return $"made for pet NPC {item.PetNpcId}";
+        if (item.EquipSlot == ElinWeaponSlot
+            && (pet.NpcId == ElinPet && !ElinWeapons.Contains(item.Id) || pet.NpcId == RebornElinPet && !RebornElinWeapons.Contains(item.Id)))
+            return "the Elin pet wears only its plasma weapons";
+        if (GearLocked(session, pet) is { } locked)
+            return locked;
+        if (!item.IsEquipment || pet.Tradable != 1)
+            return pet.Tradable != 1 ? "a quest pet" : "not equipment";
+        return (item.Flags & NorthIsland.GameData.Items.ItemRecord.NotForPetsFlag) != 0 ? "not for pets" : null;
+    }
+
+    /// <summary>The refusal for the gear of a soldier (mercenary) pet, the client's own text.</summary>
+    private const string SoldierGear = "Soldiers equipment can't be changed";
+
+    /// <summary>Whether a pet is a soldier (mercenary), whose gear the client never lets change.</summary>
+    /// <param name="pet">The pet.</param>
+    /// <returns>True when the pet's NPC record is a mercenary.</returns>
+    private bool IsMercenary(Pet pet) => npcs[pet.NpcId] is { IsMercenary: true };
+
+    /// <summary>
+    /// Tells why a pet's gear may not change: the pet is up for sale in the owner's pet stall, or the owner offers it in an open pet trade, whose
+    /// partner was shown the pet with the gear it wore then (the trade keeps only the pet, so it cannot see gear taken off after the offer).
+    /// </summary>
+    /// <param name="session">The owner's session.</param>
+    /// <param name="pet">The pet.</param>
+    /// <returns>The reason for the log, or null when the gear may change.</returns>
+    private static string? GearLocked(GameSession session, Pet pet) =>
+        session.Stalls.Pets?.Prices.ContainsKey(pet.Slot) == true ? "the pet is in the pet stall"
+        : session.Trades.Pets is { Closed: false } trade && ReferenceEquals(trade.Of(session).Pet, pet) ? "the pet is offered in a pet trade"
+        : null;
+
+    /// <summary>Whether a worn piece can take the place of the bag stack it is swapped with: the stack leaves its slot and the piece fits.</summary>
+    /// <param name="character">The player's character.</param>
+    /// <param name="stack">The bag stack being put on.</param>
+    /// <param name="wornItemId">The item id of the worn piece that goes back to the bag.</param>
+    /// <returns>True when the piece fits in the stack's slot once one item of the stack is taken.</returns>
+    private bool FitsInPlace(Character character, BagItem stack, ushort wornItemId) =>
+        stack.Count == 1 && Bag.Fits(character, items, wornItemId, stack.Slot, ignore: stack);
+
     /// <summary>
     /// Handles moving an item between bag slots: pours a potion into a bottle, moves or splits a stack into an empty slot, tops up a stack of the
-    /// same stackable item with what fits, or swaps a whole stack with a different item of the same size. The ridden vehicle and the puppet's
-    /// item stay where they are. The answer, 23/10, carries the count that moved; the client swaps when the target holds a different item.
+    /// same stackable item with what fits, or swaps a whole stack with a different item of the same size. A slot committed elsewhere (see
+    /// <see cref="BagLocks"/>) and the puppet's item stay where they are. The answer, 23/10, carries the count that moved; the client swaps when
+    /// the target holds a different item.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the source slot, the target slot and the count (0 for the whole stack).</param>
@@ -326,15 +494,17 @@ public sealed class ItemHandlers(
             return ValueTask.CompletedTask;
         }
 
+        if ((BagLocks.LockedBy(session, move.From) ?? BagLocks.LockedBy(session, move.To)
+                ?? (HoldsPuppet(character, move.From) || HoldsPuppet(character, move.To) ? "the puppet's item" : null)) is { } locked)
+        {
+            logger.LogWarning("[{Session}] bag move {From} -> {To}: a slot holds {Why}, it stays put", session.Id, move.From, move.To, locked);
+            return ValueTask.CompletedTask;
+        }
+
         var count = move.Count == 0 || move.Count > source.Count ? source.Count : move.Count;
         var target = character.Bag.Find(b => b.Slot == move.To);
         if (target is not null && bottles.TryFill(session, character, source, target))
             return ValueTask.CompletedTask;
-        if (Pinned(session, character, move.From) || Pinned(session, character, move.To))
-        {
-            logger.LogWarning("[{Session}] bag move {From} -> {To}: the ridden vehicle or the puppet's item stays put", session.Id, move.From, move.To);
-            return ValueTask.CompletedTask;
-        }
         if (target is null && !Bag.Fits(character, items, source.ItemId, move.To, ignore: count == source.Count ? source : null))
         {
             logger.LogWarning("[{Session}] bag move {From} -> {To}: item {Item} does not fit there", session.Id, move.From, move.To, source.ItemId);
@@ -365,7 +535,7 @@ public sealed class ItemHandlers(
         }
         else if (target.ItemId == source.ItemId && Bag.IsStackable(items[source.ItemId]))
         {
-            count = (byte)Math.Min(count, Bag.MaxStack - target.Count);
+            count = (byte)Math.Clamp(Bag.MaxStack - target.Count, 0, count);
             if (count == 0)
                 return ValueTask.CompletedTask;
             target.Count += count;
@@ -386,15 +556,19 @@ public sealed class ItemHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Whether a bag slot holds something that must not move: the vehicle being ridden or the item lent to a puppet helper.</summary>
-    /// <param name="session">The player's session.</param>
+    /// <summary>Whether a bag slot holds the item of the running puppet play, which must not move.</summary>
     /// <param name="character">The player's character.</param>
     /// <param name="slot">The bag slot.</param>
-    /// <returns>True when the slot is pinned.</returns>
-    private static bool Pinned(GameSession session, Character character, byte slot) =>
-        session.Vehicle?.BagSlot == slot || (character.PuppetBagSlot != 0 && character.PuppetBagSlot == slot);
+    /// <returns>True when the slot holds the puppet's item.</returns>
+    private static bool HoldsPuppet(Character character, byte slot) => character.PuppetBagSlot != 0 && character.PuppetBagSlot == slot;
 
-    /// <summary>Handles picking up a thing from the ground: gold goes to the purse, an item to the bag when all of it fits.</summary>
+    /// <summary>The farthest the player may stand from a thing on the ground on each axis to pick it up, in pixels (the client's limit).</summary>
+    private const int PickUpReach = 170;
+
+    /// <summary>
+    /// Handles picking up a thing from the ground within reach, outside battle and alive: gold goes to the purse, an item to the bag when all of it
+    /// fits, with the attributes it was dropped with. A thing that cannot be transferred stays for the player who dropped it.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the index of the thing on the ground, 16 bits.</param>
     internal ValueTask OnPickUp(GameSession session, ReadOnlyMemory<byte> body)
@@ -402,33 +576,37 @@ public sealed class ItemHandlers(
         if (CharacterOf(session) is not { } character || body.Length < 2)
             return ValueTask.CompletedTask;
         var index = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(body.Span);
-        if (ground.Peek(session, index) is not { } peek)
+        if (session.Battle is not null || character.Hp <= 0)
         {
-            logger.LogInformation("[{Session}] pick up: nothing at ground index {Index}", session.Id, index);
+            logger.LogWarning("[{Session}] pick up ground index {Index}: {Why}", session.Id, index,
+                session.Battle is not null ? "in a battle" : "dead");
             return ValueTask.CompletedTask;
         }
-        if (peek.Owner != 0 && peek.Owner != session.Account!.LoginId)
+        var answer = false; // whether the client is told it cannot pick the thing up
+        var thing = ground.TakeIf(session, index, (seen, x, y) =>
         {
-            logger.LogInformation("[{Session}] pick up: {Item} at ground index {Index} cannot be transferred and belongs to {Owner}", session.Id,
-                peek.ItemId, index, peek.Owner);
-            session.Send(new Protocol.IO.PacketWriter(Action23.Code, Action23.CannotPickUp).ToArray());
-            return ValueTask.CompletedTask;
-        }
-        if (peek.Gold == 0)
+            if (Math.Abs(x - character.X) > PickUpReach || Math.Abs(y - character.Y) > PickUpReach)
+                return $"too far away at ({x}, {y}), the player is at ({character.X}, {character.Y})";
+            answer = true;
+            if (seen.Owner != 0 && seen.Owner != session.Account!.LoginId)
+                return $"cannot be transferred and belongs to {seen.Owner}";
+            if (seen.Gold == 0 && Bag.Add(Bag.Trial(character.Bag), items, seen.ItemId, seen.Count).Sum(c => c.Added) < seen.Count)
+                return "no room in the bag";
+            answer = false;
+            return null;
+        }, out var refused);
+        if (thing is null)
         {
-            List<BagItem> trial = [
-                .. character.Bag.Select(
-                    b =>
-                        new BagItem { Slot = b.Slot, ItemId = b.ItemId, Count = b.Count, Wear = b.Wear, Fusion = b.Fusion, Pose = b.Pose, BoxItem = b.BoxItem })
-            ];
-            if (Bag.Add(trial, items, peek.ItemId, peek.Count).Sum(c => c.Added) < peek.Count)
-            {
+            if (refused is null)
+                logger.LogInformation("[{Session}] pick up: nothing at ground index {Index}", session.Id, index);
+            else if (answer)
+                logger.LogInformation("[{Session}] pick up ground index {Index}: {Why}", session.Id, index, refused);
+            else
+                logger.LogWarning("[{Session}] pick up ground index {Index}: {Why}", session.Id, index, refused);
+            if (answer)
                 session.Send(new Protocol.IO.PacketWriter(Action23.Code, Action23.CannotPickUp).ToArray());
-                return ValueTask.CompletedTask;
-            }
-        }
-        if (ground.Take(session, index) is not { } thing)
             return ValueTask.CompletedTask;
+        }
 
         if (thing.Gold > 0)
         {
@@ -436,7 +614,12 @@ public sealed class ItemHandlers(
             logger.LogInformation("[{Session}] {Name} picks up {Gold} gold ({Total} now)", session.Id, character.Name, thing.Gold, character.Gold);
             return ValueTask.CompletedTask;
         }
-        Bag.SendObtained(session, items, thing.ItemId, Bag.Add(character, items, thing.ItemId, thing.Count, thing.Wear));
+        var added = Bag.Add(character, items, thing.ItemId, thing.Count, thing.Wear, thing.Insert, thing.Fusion, thing.Pose, thing.BoxItem,
+            thing.Used, thing.Extra);
+        if (thing.HasAttributes)
+            Bag.SendAdded(session, added); // 23/8 names each slot with the stack's attributes, which 23/6 cannot carry
+        else
+            Bag.SendObtained(session, items, thing.ItemId, added);
         logger.LogInformation("[{Session}] {Name} picks up {Item} ({ItemName}) x{Count} from ground index {Index}", session.Id, character.Name,
             thing.ItemId, items[thing.ItemId]?.Name, thing.Count, index);
         return ValueTask.CompletedTask;
@@ -452,7 +635,7 @@ public sealed class ItemHandlers(
         if (CharacterOf(session) is not { } character || body.Length < 2)
             return ValueTask.CompletedTask;
         if (options.Value.DropConfirmBelowLevel > 0 && character.Level < options.Value.DropConfirmBelowLevel
-            && character.Bag.Find(b => b.Slot == body.Span[0]) is { } asked && session.Vehicle?.BagSlot != asked.Slot)
+            && character.Bag.Find(b => b.Slot == body.Span[0]) is { } asked && !BagLocks.IsLocked(session, asked.Slot))
         {
             var count = body.Span[1] == 0 || body.Span[1] > asked.Count ? asked.Count : body.Span[1];
             session.Send(new PacketWriter(Action23.Code, Action23.DiscardConfirm).U8(1).U8(asked.Slot).U16(asked.ItemId).U8((byte)count).ToArray());
@@ -529,6 +712,11 @@ public sealed class ItemHandlers(
             return ValueTask.CompletedTask;
         var (slot, count, petSlot) = (body.Span[0], body.Span[1], body.Span[2]);
         var stack = character.Bag.Find(b => b.Slot == slot);
+        if (stack is not null && BagLocks.LockedBy(session, slot) is { } locked)
+        {
+            logger.LogWarning("[{Session}] use item: {Item} in bag slot {Slot} is {Why}", session.Id, stack.ItemId, slot, locked);
+            return ValueTask.CompletedTask;
+        }
         var item = stack is null ? null : items[stack.ItemId];
         if (stack?.ItemId == ItemEffectHandlers.Stopwatch)
         {
@@ -679,7 +867,9 @@ public sealed class ItemHandlers(
     /// <param name="slot">The bag slot.</param>
     /// <param name="count">How many to take; 0 or more than the stack means the whole stack.</param>
     /// <param name="what">What is being done, for the log.</param>
-    /// <returns>What was taken, or null when the slot is empty or holds the player's vehicle.</returns>
+    /// <returns>
+    /// What was taken, with every attribute of the stack, or null when the slot is empty or committed elsewhere (see <see cref="BagLocks"/>).
+    /// </returns>
     private GroundThing? TakeStack(
         GameSession session,
         Character character,
@@ -688,15 +878,17 @@ public sealed class ItemHandlers(
         string what)
     {
         var stack = character.Bag.Find(b => b.Slot == slot);
-        if (stack is null || session.Vehicle?.BagSlot == slot)
+        var refusal = stack is null ? "empty" : BagLocks.LockedBy(session, slot);
+        if (stack is null || refusal is not null)
         {
-            logger.LogWarning("[{Session}] {What}: bag slot {Slot} cannot be used", session.Id, what, slot);
+            logger.LogWarning("[{Session}] {What}: bag slot {Slot} cannot be used ({Why})", session.Id, what, slot, refusal);
             return null;
         }
         var taken = count == 0 || count > stack.Count ? stack.Count : count;
         TakeFromBag(character, stack, taken);
         session.Send(ItemMessages.BagSlotDecrease(slot, taken));
-        return new GroundThing(stack.ItemId, taken, 0, stack.Wear);
+        return new GroundThing(stack.ItemId, taken, 0, stack.Wear, Insert: stack.Insert, Fusion: stack.Fusion, Pose: stack.Pose,
+            BoxItem: stack.BoxItem, Used: stack.Used, Extra: stack.Extra);
     }
 
     /// <summary>Adds one item to the bag.</summary>

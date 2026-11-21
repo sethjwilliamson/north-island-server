@@ -9,12 +9,14 @@ namespace NorthIsland.Server.Features.Social;
 /// <summary>Handles small player settings and actions: options, actions (and the HP and SP recovery while sitting), nickname, profile, hotkeys, emotions.</summary>
 /// <param name="world">World state, for broadcasts.</param>
 /// <param name="options">Item options, with the Yes-No Board emotions.</param>
-/// <param name="socialOptions">Social options, with the sitting recovery.</param>
+/// <param name="socialOptions">Social options, with the sitting recovery and whether quests can be abandoned.</param>
+/// <param name="marks">The mark data, which tells quest counters from completion flags.</param>
 /// <param name="logger">Logger.</param>
 public sealed class SocialHandlers(
     WorldState world,
     Microsoft.Extensions.Options.IOptions<ItemOptions> options,
     Microsoft.Extensions.Options.IOptions<SocialOptions> socialOptions,
+    MarkData marks,
     ILogger<SocialHandlers> logger)
 {
     /// <summary>The first frame of the sit-down action: group 46 (ActionMotionIds[13], the default Alt+1), one frame per direction.</summary>
@@ -193,7 +195,11 @@ public sealed class SocialHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Removes a quest mark the player gives up.</summary>
+    /// <summary>
+    /// Removes a quest the player gives up: the counter mark of a quest going on. Refused while <see cref="SocialOptions.QuestAbandon"/> is off
+    /// (the quest window never shows its Delete button), and for any mark that is not a counter the character holds above 0, that Mark.dat
+    /// does not list as a counter (completion flags are never removed), or that is the progress of an activity run.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the mark id.</param>
     internal ValueTask OnAbandonQuest(GameSession session, ReadOnlyMemory<byte> body)
@@ -201,8 +207,17 @@ public sealed class SocialHandlers(
         if (InWorld(session) is not { } character || body.Length < 2)
             return ValueTask.CompletedTask;
         var id = new PacketReader(body.Span).U16();
-        if (character.Marks.RemoveAll(m => m.Id == id) == 0)
+        var why = !socialOptions.Value.QuestAbandon ? "abandoning quests is off"
+            : character.Marks.Find(m => m.Id == id) is not { Count: > 0 } ? "no such quest is going on"
+            : !marks.IsCounter(id) ? "the mark is not a quest counter"
+            : EventArenas.RunMarks.Contains(id) ? "the mark is the progress of an activity run"
+            : null;
+        if (why is not null)
+        {
+            logger.LogWarning("[{Session}] {Name}: abandon of quest mark {Mark} refused, {Why}", session.Id, character.Name, id, why);
             return ValueTask.CompletedTask;
+        }
+        character.Marks.RemoveAll(m => m.Id == id);
         session.Send(Protocol.Messages.Events.MarkMessages.Delete(id));
         logger.LogInformation("[{Session}] {Name} abandons quest mark {Mark}", session.Id, character.Name, id);
         return ValueTask.CompletedTask;

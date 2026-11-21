@@ -183,6 +183,47 @@ public static class Carnival
         34108, // 2X EXP Potion
         34107]; // 1.5X EXP Potion
 
+    /// <summary>Gets the prize table of a spinning machine (Lucky 7, small Lucky 7, Diamond Hit), indexed by prize 0..10.</summary>
+    /// <param name="game">The machine's sport kind.</param>
+    /// <returns>The Lucky 7 list, the Diamond Hit list, otherwise the small Lucky 7 list.</returns>
+    public static ImmutableArray<ushort> SpinPrizes(byte game) => game switch
+    {
+        Lucky7 => Lucky7Prizes, // Lucky 7 prize table
+        DiamondHit => DiamondHitPrizes, // Diamond Hit prize table
+        _ => Lucky7MiniPrizes, // small Lucky 7 prize table
+    };
+
+    /// <summary>
+    /// Gets every item one play of a machine can pay, so the bag can be checked for all of them before the play is drawn: the whole table
+    /// of a machine that draws its prize, the one prize the client's result names on Baby Dolls and Golden Glove.
+    /// </summary>
+    /// <param name="game">The machine's sport kind.</param>
+    /// <param name="detail">The client's detail byte: the caught doll on Baby Dolls, the result on Golden Glove.</param>
+    /// <returns>The item ids, one of each play's outcomes.</returns>
+    public static IReadOnlyList<ushort> PossiblePrizes(byte game, byte detail) => game switch
+    {
+        FortuneEgg => FortuneEggPrizes, // Fortune Egg: any egg's prize
+        Lucky7 or Lucky7Mini or DiamondHit => SpinPrizes(game), // the spinning machines: their whole table
+        Jigsaw or JigsawSec or JigsawThird => JigsawPrizes(game), // the Jigsaw machines: their whole table
+        BabyDolls => [DollPrize(detail)], // Baby Dolls: the caught doll's prize
+        _ => [GlovePrize(detail)], // Golden Glove and any other machine: the prize of the client's result
+    };
+
+    /// <summary>
+    /// Gets the shortest time the client's game of a skill machine takes from one result to the next, less a margin for network delay; a
+    /// result sent sooner did not come from a play. Baby Dolls: the claw comes down, closes, holds, goes up, holds and drops the doll before
+    /// the next grab, about 130 frames of 30 ms (4 s) at the least. Golden Glove: the reward shows for 50 frames and the next play takes at
+    /// least one punch of about 14 frames before a quit and three before a result, at least about 1.9 s.
+    /// </summary>
+    /// <param name="game">The machine's sport kind.</param>
+    /// <returns>The shortest time, or null for a machine whose result the server draws.</returns>
+    public static TimeSpan? ShortestPlay(byte game) => game switch
+    {
+        BabyDolls => TimeSpan.FromMilliseconds(2500), // Baby Dolls: 2.5 s, of a cycle of about 4 s
+        GoldenGlove => TimeSpan.FromMilliseconds(1500), // Golden Glove: 1.5 s, of at least about 1.9 s
+        _ => null, // the server draws the other machines' results
+    };
+
     /// <summary>Gets the item a Baby Dolls play pays.</summary>
     /// <param name="doll">The caught doll's kind (1..7), or 0 for a miss.</param>
     /// <returns>The item id: a Devil's Spar of the doll's rank, or the Lottery Ticket for a miss.</returns>

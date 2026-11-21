@@ -19,7 +19,7 @@ public static class Bag
     private static readonly HashSet<ushort> SingleItems = [34152, 34155, 34017, 34022, 34160, 34163, 34164, 34168, 34180, 34106, 39074, 39097];
 
     /// <summary>The item type of vehicles.</summary>
-    private const byte VehicleType = 39;
+    public const byte VehicleType = 39; // item type 39: vehicles
 
     /// <summary>
     /// Whether items of this kind share a stack, by the client's rule (IsStackableItem): not equipment, vehicles, large, slot 9 or

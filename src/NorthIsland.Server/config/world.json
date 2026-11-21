@@ -32,13 +32,15 @@
       "OnlineDays": 15,
       "OnlineMembers": 3,
       "SweepMinutes": 10,
-      "MaxGuilds": 0
+      "MaxGuilds": 0,
+      "BadgeUploadSeconds": 60
     },
     "HotSpring": {
       "Enabled": true,
       "MinutesPerPoint": 3,
       "MaxPerVisit": 10,
-      "PointsPerStep": 1
+      "PointsPerStep": 1,
+      "MaxTotal": 100
     },
     "Sitting": {
       "Enabled": true,

@@ -32,16 +32,23 @@ public sealed class Autosave(
         }
     }
 
-    /// <summary>Banks the online time of every session and saves every online account.</summary>
+    /// <summary>
+    /// Banks the online time of every session and saves every online account, each under its session's gate so that no packet, timer or other
+    /// player changes the character while it is written. The service holds no other gate, so it may wait for each one.
+    /// </summary>
     /// <param name="ct">Cancels the saves.</param>
     private async Task SaveAllAsync(CancellationToken ct)
     {
         var saved = 0;
         var now = GameClock.UtcNow;
         foreach (var session in world.OnlineSessions())
-            OnlineTime.Bank(session, now);
-        foreach (var account in world.OnlineAccounts())
         {
+            using var exclusive = await session.ExclusiveAsync().ConfigureAwait(false);
+            if (session.Closing) // ended: the disconnect saves it
+                continue;
+            OnlineTime.Bank(session, now);
+            if (session.Account is not { } account)
+                continue;
             try
             {
                 await store.SaveAsync(account, ct).ConfigureAwait(false);

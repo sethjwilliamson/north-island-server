@@ -8,6 +8,12 @@ public sealed class BoardRegistry
     /// <summary>Notices per page and the most notices a board holds, for the public board and for a guild board.</summary>
     public const int PublicPageSize = 10, PublicMaxNotices = 250, GuildPageSize = 5, GuildMaxNotices = 100;
 
+    /// <summary>The most notices one author may have on the public board and on a guild board at the same time.</summary>
+    public const int PublicMaxPerAuthor = 5, GuildMaxPerAuthor = 10;
+
+    /// <summary>Longest notice title and text in characters, as the client's posting form allows (views/events/NoticeSendForm.xml).</summary>
+    public const int MaxTitle = 30, MaxText = 151;
+
     /// <summary>Name of the stored document.</summary>
     private const string Document = "boards";
 
@@ -53,6 +59,48 @@ public sealed class BoardRegistry
             return _state.Notices.Find(n => n.Id == id);
     }
 
+    /// <summary>Tells whether a player may post another notice on a board: the board and the author's share of it are not full.</summary>
+    /// <param name="guildId">The board id: 0 for the public board, otherwise the guild id.</param>
+    /// <param name="authorId">The author's account id.</param>
+    /// <returns>True when a notice may be posted.</returns>
+    public bool HasRoom(uint guildId, int authorId)
+    {
+        lock (Lock)
+            return HasRoomLocked(guildId, authorId);
+    }
+
+    /// <summary>Tells whether a player may post another notice on a board; the caller holds <see cref="Lock"/>.</summary>
+    /// <param name="guildId">The board id: 0 for the public board, otherwise the guild id.</param>
+    /// <param name="authorId">The author's account id.</param>
+    /// <returns>True when neither the board nor the author's share of it is full.</returns>
+    private bool HasRoomLocked(uint guildId, int authorId)
+    {
+        var (board, mine) = (0, 0);
+        foreach (var n in _state.Notices.Where(n => n.GuildId == guildId))
+        {
+            board++;
+            if (n.AuthorId == authorId)
+                mine++;
+        }
+        return board < (guildId == 0 ? PublicMaxNotices : GuildMaxNotices) && mine < (guildId == 0 ? PublicMaxPerAuthor : GuildMaxPerAuthor);
+    }
+
+    /// <summary>Deletes every notice of a guild board and saves when there were any.</summary>
+    /// <param name="guildId">The guild id; 0 (the public board) is ignored.</param>
+    /// <returns>The number of notices deleted.</returns>
+    public int RemoveBoard(uint guildId)
+    {
+        if (guildId == 0)
+            return 0;
+        lock (Lock)
+        {
+            var removed = _state.Notices.RemoveAll(n => n.GuildId == guildId);
+            if (removed > 0)
+                Save();
+            return removed;
+        }
+    }
+
     /// <summary>Adds a notice to a board and saves.</summary>
     /// <param name="guildId">The board id: 0 for the public board, otherwise the guild id.</param>
     /// <param name="authorId">The author's account id.</param>
@@ -60,7 +108,7 @@ public sealed class BoardRegistry
     /// <param name="title">The title.</param>
     /// <param name="text">The text.</param>
     /// <param name="time">The posting time as an OLE automation date.</param>
-    /// <returns>The new notice, or null when the board is full.</returns>
+    /// <returns>The new notice, or null when the board or the author's share of it is full.</returns>
     public Notice? Post(
         uint guildId,
         int authorId,
@@ -71,7 +119,7 @@ public sealed class BoardRegistry
     {
         lock (Lock)
         {
-            if (_state.Notices.Count(n => n.GuildId == guildId) >= (guildId == 0 ? PublicMaxNotices : GuildMaxNotices))
+            if (!HasRoomLocked(guildId, authorId))
                 return null;
             var notice = new Notice
             {

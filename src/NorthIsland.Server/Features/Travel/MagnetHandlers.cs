@@ -8,9 +8,11 @@ namespace NorthIsland.Server.Features.Travel;
 /// Serves the Magic Magnet: a player wearing it asks another player wearing it to be pulled to them, and the other player agrees or refuses.
 /// </summary>
 /// <param name="world">The online sessions.</param>
+/// <param name="travel">The teleport rule, for the maps and states that bar a pull.</param>
 /// <param name="logger">The logger.</param>
 public sealed class MagnetHandlers(
     WorldState world,
+    TravelRules travel,
     ILogger<MagnetHandlers> logger)
 {
     /// <summary>The item id of the Magic Magnet.</summary>
@@ -29,12 +31,16 @@ public sealed class MagnetHandlers(
     /// <returns>The level.</returns>
     private static int Level(Character c) => Career.TotalLevel(c);
 
-    /// <summary>Tells whether the player cannot be pulled or pull: in an event, in a house, or on a map without magic travel.</summary>
+    /// <summary>
+    /// Tells whether the player cannot pull or be pulled: a busy state of the teleport rule, or a map no teleport may leave or reach; the
+    /// asker's map is where the pull lands, so it may not be the sea either (the client's sceneBarsUse and sceneBarsAnswer).
+    /// </summary>
     /// <param name="s">The session.</param>
     /// <param name="c">The session's character.</param>
+    /// <param name="asker">True for the asker, whose map the asked player is pulled to.</param>
     /// <returns>True when barred.</returns>
-    private static bool Barred(GameSession s, Character c) =>
-        s.Event is not null || TentHandlers.IsHouseMap(c.MapId) || MagicMap.NoTeleportMaps.Contains(c.MapId);
+    private bool Barred(GameSession s, Character c, bool asker) =>
+        TravelRules.BusyRefusal(s) is not null || (asker ? travel.ArrivalRefusal(c.MapId) is not null : travel.IsBarred(c.MapId));
 
     /// <summary>Handles the magnet packet (<c>23/90</c>): sub code 1 asks a player, 2 agrees, 3 refuses and 4 answers with a code.</summary>
     /// <param name="session">The player's session.</param>
@@ -86,7 +92,7 @@ public sealed class MagnetHandlers(
                     : session.Trades.Items is not null ? 11
                         : session.Vehicle is not null ? 13
                             : session.Magnet.Target != 0 ? 3
-                                : Barred(session, c) ? 9
+                                : Barred(session, c, asker: true) ? 9
                                     : targetId == myId || world.SessionOf(targetId) is not { } target || target.ActiveCharacter is not { } t ? 254
                                         : !Wears(t) ? 21
                                             : Level(t) < MinLevel ? 16
@@ -95,7 +101,7 @@ public sealed class MagnetHandlers(
                                                         : target.Trades.Items is not null ? 1
                                                             : target.Vehicle is not null ? 14
                                                                 : target.Magnet.Requester != 0 || target.Magnet.Target != 0 ? 6
-                                                                    : Barred(target, t) ? 10
+                                                                    : Barred(target, t, asker: false) ? 10
                                                                         : 0;
         if (code != 0)
         {
@@ -111,7 +117,8 @@ public sealed class MagnetHandlers(
     }
 
     /// <summary>
-    /// The asked player agrees: if both sides still can, they are moved to the asker's position and the asker is told it succeeded.
+    /// The asked player agrees: if both sides still can (no vehicle, both wear the magnet, neither is barred), they are moved to the asker's
+    /// position and the asker is told it succeeded.
     /// </summary>
     /// <param name="target">The session of the asked player.</param>
     /// <param name="t">The character of the asked player.</param>
@@ -125,7 +132,8 @@ public sealed class MagnetHandlers(
         }
         target.Magnet.Requester = 0;
         requester.Magnet.Target = 0;
-        if (requester.Battle is not null || target.Battle is not null || !Wears(c) || !Wears(t) || Barred(requester, c) || Barred(target, t))
+        if (requester.Vehicle is not null || target.Vehicle is not null || !Wears(c) || !Wears(t) || Barred(requester, c, asker: true)
+            || Barred(target, t, asker: false))
         {
             requester.Send(MagnetMessages.Result(21));
             return;

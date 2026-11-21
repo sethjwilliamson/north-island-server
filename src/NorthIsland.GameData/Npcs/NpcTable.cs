@@ -73,6 +73,10 @@ public sealed class NpcTable
                 NoPk = U8(r, 110) == 1,
                 GrowKey = U8(r, 109),
                 Key = U16(r, 100),
+                DirectionKind = U8(r, 93), // record offset 93: direction kind
+                Weapon = U8(r, 96), // record offset 96: weapon flag
+                FixedSkill = U16(r, 106), // record offset 106: fixed skill
+                Mercenary = U16(r, 120), // record offset 120: mercenary flag
             });
         }
         return new NpcTable(byId);

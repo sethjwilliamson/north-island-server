@@ -28,6 +28,15 @@ public static class GridStore
     /// <returns>True when they merge.</returns>
     public static bool Stacks(BagItem a, BagItem b, bool stackable) => stackable ? a.ItemId == b.ItemId : Same(a, b);
 
+    /// <summary>
+    /// Whether a stack carries nothing beyond its item id, count and wear: no stone, fusion level, pose, used or extra amount or box. Stores that
+    /// keep no more than those (a stall case; a furniture box, which keeps no wear either and gives the items back at wear 1) take only such stacks,
+    /// so nothing else the stack carries is lost or reset on the way back.
+    /// </summary>
+    /// <param name="stack">The stack.</param>
+    /// <returns>True when the stack has no other attribute set.</returns>
+    public static bool IsPlain(BagItem stack) => Same(stack, new BagItem { ItemId = stack.ItemId, Wear = stack.Wear });
+
     /// <summary>Makes a copy of a stack with another slot and count.</summary>
     /// <param name="b">The stack to copy.</param>
     /// <param name="slot">The slot of the copy.</param>

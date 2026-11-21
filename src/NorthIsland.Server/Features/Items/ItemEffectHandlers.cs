@@ -666,7 +666,7 @@ public sealed class ItemEffectHandlers(
         foreach (var pet in gone)
         {
             if (character.Pets.Contains(pet))
-                PetTradeHandlers.Give(world, session, character, pet);
+                Pets.Exile(session, character, pet, world, combat); // resends the combat stats when the owner rode it
             else
                 character.StoredPets.Remove(pet);
             logger.LogInformation("[{Session}] {Name}: mercenary {Pet} ({Npc}) leaves, the lease ran out", session.Id, character.Name, pet.Name, pet.NpcId);

@@ -108,6 +108,7 @@ public sealed class SqlAccountStore : IAccountStore, IDisposable
 
     public async Task<Account> CreateAsync(string name, string password, CancellationToken ct = default)
     {
+        var hash = PasswordHasher.Hash(password); // hashed before the lock: the key stretching would hold up every other account access
         await _lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -118,7 +119,7 @@ public sealed class SqlAccountStore : IAccountStore, IDisposable
             {
                 LoginId = _nextLoginId,
                 Name = name,
-                PasswordHash = PasswordHasher.Hash(password),
+                PasswordHash = hash,
                 CreatedUtc = GameClock.UtcNow,
             };
             await WriteAsync(account, ct).ConfigureAwait(false);

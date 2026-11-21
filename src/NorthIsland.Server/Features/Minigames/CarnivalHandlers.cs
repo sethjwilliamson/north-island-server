@@ -70,7 +70,11 @@ public sealed class CarnivalHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Spins the Lucky Wheel: draws a slot, charges the play and gives the prize if it fits in the bag.</summary>
+    /// <summary>
+    /// Spins the Lucky Wheel: checks that every prize of the wheel would fit in the bag, charges the play, then draws a slot and gives its
+    /// prize. The room is checked for every prize before the draw, so a full bag refuses the spin instead of refusing only the prizes that
+    /// do not fit, which would let a player spin for free until a wanted prize is the one that fits.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the pay kind; when empty the kind chosen on the wheel is used.</param>
     internal ValueTask OnWheelSpin(GameSession session, ReadOnlyMemory<byte> body)
@@ -84,14 +88,20 @@ public sealed class CarnivalHandlers(
         }
         var payKind = body.Length < 1 ? wheel.PayKind : body.Span[0];
         var times = wheel.Doubled ? 2 : 1;
-        var slot = LuckyWheel.Spin(wheel.Codes, GameRandom.Shared.Next);
-        var (_, item, count) = LuckyWheel.Prize(wheel.Codes[slot - 1]);
-        var quantity = (byte)(count * times);
-        if (!Fits(character, item, quantity) || !Pay(session, account, character, LuckyWheel.Kind, payKind, times))
+        if (!wheel.Codes.All(code => LuckyWheel.Prize(code) is var (_, prize, n) && Fits(character, prize, n * times)))
+        {
+            logger.LogInformation("[{Session}] {Name}: no room for every prize of the Lucky Wheel; not spun", session.Id, character.Name);
+            session.Send(CarnivalMessages.NoPoints(LuckyWheel.Kind));
+            return ValueTask.CompletedTask;
+        }
+        if (!Pay(session, account, character, LuckyWheel.Kind, payKind, times))
         {
             session.Send(CarnivalMessages.NoPoints(LuckyWheel.Kind));
             return ValueTask.CompletedTask;
         }
+        var slot = LuckyWheel.Spin(wheel.Codes, GameRandom.Shared.Next);
+        var (_, item, count) = LuckyWheel.Prize(wheel.Codes[slot - 1]);
+        var quantity = (byte)(count * times);
         wheel.Doubled = false;
         foreach (var (stack, added) in Bag.Add(character, items, item, quantity))
             session.Send(ItemMessages.BagAdd(new BagEntry { Slot = stack.Slot, ItemId = item, Count = added, Wear = stack.Wear }));
@@ -101,7 +111,11 @@ public sealed class CarnivalHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Starts a Lucky Cards play: charges it and deals the cards.</summary>
+    /// <summary>
+    /// Starts a Lucky Cards play: checks that the bag has room for the most a play can pay (the prizes of two pairs, whichever they are,
+    /// or the consolation item), charges it and deals the cards. A pair's prize is drawn only after the play is paid, and without the room
+    /// check before paying a full bag would lose it.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the pay kind, 1 when empty.</param>
     internal ValueTask OnPokePlay(GameSession session, ReadOnlyMemory<byte> body)
@@ -114,6 +128,12 @@ public sealed class CarnivalHandlers(
             return ValueTask.CompletedTask;
         }
         var payKind = body.Length < 1 ? (byte)1 : body.Span[0];
+        if (!LuckyCardsFit(character))
+        {
+            logger.LogInformation("[{Session}] {Name}: no room for every prize of Lucky Cards; not played", session.Id, character.Name);
+            session.Send(CarnivalMessages.NoPoints(LuckyCards.Kind));
+            return ValueTask.CompletedTask;
+        }
         if (!Pay(session, account, character, LuckyCards.Kind, payKind))
         {
             session.Send(CarnivalMessages.NoPoints(LuckyCards.Kind));
@@ -222,7 +242,10 @@ public sealed class CarnivalHandlers(
     }
 
     /// <summary>
-    /// Plays a machine once: draws the prize, checks the bag, charges the play and sends the bag change and the machine's answer.
+    /// Plays a machine once: checks that every prize the play can pay would fit in the bag, and for the skill machines (Baby Dolls, Golden
+    /// Glove) that the result does not come sooner after the last one than the client's game allows; then charges the play, draws the
+    /// prize and sends the bag change and the machine's answer. The room is checked for every prize before the draw, so a full bag refuses
+    /// the play instead of refusing only the prizes that do not fit, which would let a player play for free until a wanted prize fits.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="game">The machine's sport kind, which has to be the game the session is in.</param>
@@ -239,6 +262,36 @@ public sealed class CarnivalHandlers(
         var payKind = game is Carnival.Lucky7Mini or Carnival.Jigsaw || body.Length < 1 ? (byte)1 : body.Span[0];
         var detail = body.Length >= 2 ? body.Span[1] : (byte)0;
 
+        if (!Carnival.PossiblePrizes(game, detail).All(p => Fits(character, p)))
+        {
+            logger.LogInformation("[{Session}] {Name}: no room for every prize of machine {Game}; not played", session.Id, character.Name, game);
+            session.Send(CarnivalMessages.NoPoints(game));
+            return ValueTask.CompletedTask;
+        }
+        var now = GameClock.UtcNow;
+        var plays = session.Feature<SkillPlays>();
+        if (Carnival.ShortestPlay(game) is { } shortest && plays.Last.TryGetValue(game, out var last) && now - last < shortest)
+        {
+            logger.LogWarning("[{Session}] {Name}: result {Detail} of machine {Game} {Ms} ms after the last one, sooner than a play takes ({Shortest} ms)",
+                session.Id, character.Name, detail, game, (int)(now - last).TotalMilliseconds, (int)shortest.TotalMilliseconds);
+            session.Send(CarnivalMessages.NoPoints(game));
+            return ValueTask.CompletedTask;
+        }
+        var lucky7 = game is Carnival.Lucky7 or Carnival.Lucky7Mini && calendar.NewYearOn();
+        var free = lucky7 && character.NewYearLucky7 >= eventOptions.Value.NewYear.FreeAfter;
+        if (!free && !Pay(session, account, character, game, payKind))
+        {
+            session.Send(CarnivalMessages.NoPoints(game));
+            return ValueTask.CompletedTask;
+        }
+        if (Carnival.ShortestPlay(game) is not null)
+            plays.Last[game] = now;
+        if (lucky7)
+        {
+            character.NewYearLucky7 = free ? 0 : character.NewYearLucky7 + 1;
+            session.Send(PlayerMessages.Lucky7Count(character.NewYearLucky7));
+        }
+
         Func<int, int> roll = GameRandom.Shared.Next;
         byte[] answer;
         ushort prize;
@@ -253,12 +306,7 @@ public sealed class CarnivalHandlers(
             case Carnival.Lucky7Mini: // small Lucky 7: same spin, prize from its own table
             case Carnival.DiamondHit: // Diamond Hit: same spin, prize from its own table
                 var (slot, reels) = Carnival.Spin(roll);
-                prize = (game switch
-                {
-                    Carnival.Lucky7 => Carnival.Lucky7Prizes, // Lucky 7 prize table
-                    Carnival.DiamondHit => Carnival.DiamondHitPrizes, // Diamond Hit prize table
-                    _ => Carnival.Lucky7MiniPrizes // small Lucky 7 prize table
-                })[slot];
+                prize = Carnival.SpinPrizes(game)[slot];
                 answer = CarnivalMessages.Spin(game, slot, reels, 1);
                 break;
             case Carnival.Jigsaw: // Jigsaw: draws a piece, prize from its table
@@ -277,19 +325,6 @@ public sealed class CarnivalHandlers(
                 answer = CarnivalMessages.Reward(game, andExit: detail == 2, prize, 1);
                 break;
         }
-
-        var lucky7 = game is Carnival.Lucky7 or Carnival.Lucky7Mini && calendar.NewYearOn();
-        var free = lucky7 && character.NewYearLucky7 >= eventOptions.Value.NewYear.FreeAfter;
-        if (!Fits(character, prize) || !free && !Pay(session, account, character, game, payKind))
-        {
-            session.Send(CarnivalMessages.NoPoints(game));
-            return ValueTask.CompletedTask;
-        }
-        if (lucky7)
-        {
-            character.NewYearLucky7 = free ? 0 : character.NewYearLucky7 + 1;
-            session.Send(PlayerMessages.Lucky7Count(character.NewYearLucky7));
-        }
         foreach (var (stack, added) in Bag.Add(character, items, prize, 1))
             session.Send(ItemMessages.BagAdd(new BagEntry { Slot = stack.Slot, ItemId = prize, Count = added, Wear = stack.Wear }));
         session.Send(answer);
@@ -298,18 +333,38 @@ public sealed class CarnivalHandlers(
         return ValueTask.CompletedTask;
     }
 
+    /// <summary>When each skill machine (Baby Dolls, Golden Glove) last paid a result to a session, kept on the session.</summary>
+    internal sealed class SkillPlays
+    {
+        /// <summary>The time (UTC) of the last paid result, by the machine's sport kind.</summary>
+        public Dictionary<byte, DateTime> Last { get; } = [];
+    }
+
+    /// <summary>
+    /// Tells whether the most a Lucky Cards play can pay fits in the bag: the consolation item, and the prizes of two pairs for every two
+    /// pair prizes (the same one twice included), each tried on a copy of the bag.
+    /// </summary>
+    /// <param name="character">The player's character.</param>
+    /// <returns>True when every outcome fits.</returns>
+    private bool LuckyCardsFit(Character character) =>
+        Fits(character, LuckyCards.Consolation)
+        && Carnival.FortuneEggPrizes.All(a => Carnival.FortuneEggPrizes.All(b => Fits(character, [(a, 1), (b, 1)])));
+
     /// <summary>Tells whether a prize fits in the character's bag, trying it on a copy of the bag.</summary>
     /// <param name="character">The player's character.</param>
     /// <param name="prize">The prize item id; an unknown item never fits.</param>
     /// <param name="count">How many to add.</param>
     /// <returns>True when all of them fit.</returns>
-    private bool Fits(Character character, ushort prize, int count = 1)
+    private bool Fits(Character character, ushort prize, int count = 1) => Fits(character, [(prize, count)]);
+
+    /// <summary>Tells whether several prizes fit in the character's bag together, adding them one after the other to a copy of the bag.</summary>
+    /// <param name="character">The player's character.</param>
+    /// <param name="prizes">The prize item ids and counts; an unknown item never fits.</param>
+    /// <returns>True when all of them fit.</returns>
+    private bool Fits(Character character, IEnumerable<(ushort Item, int Count)> prizes)
     {
-        List<BagItem> trial = [
-            .. character.Bag.Select(
-                b => new BagItem { Slot = b.Slot, ItemId = b.ItemId, Count = b.Count, Wear = b.Wear, Fusion = b.Fusion, Pose = b.Pose, BoxItem = b.BoxItem })
-        ];
-        return items[prize] is not null && Bag.Add(trial, items, prize, count).Sum(c => c.Added) == count;
+        var trial = Bag.Trial(character.Bag);
+        return prizes.All(p => items[p.Item] is not null && Bag.Add(trial, items, p.Item, p.Count).Sum(c => c.Added) == p.Count);
     }
 
     /// <summary>Charges one play (or several) in item-mall points or in tokens taken from the bag.</summary>

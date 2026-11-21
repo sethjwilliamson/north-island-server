@@ -17,9 +17,15 @@ public static class GatherPools
     /// <summary>The materials used by more than one pool.</summary>
     private const ushort Grass = 40014, Cotton = 40007, Harl = 40008, Vine = 40011, VineGrass = 40012, Wood = 45005, Lauan = 45007, Oak = 45006,
         Cypress = 45008, Clay = 44001, RedClay = 44002, BlackClay = 44003, WhiteClay = 44004, YellowClay = 44005, GreyClay = 44006, DryClay = 44007,
-        Stone = 43001, Shale = 43002, Sulfur = 42043, Quartz = 42058, CopperOre = 42008, IronOre = 42014, PureIronOre = 42020, AluminumOre = 42033;
+        Stone = 43001, Shale = 43002, Sulfur = 42043, Quartz = 42058, CopperOre = 42008, IronOre = 42014, PureIronOre = 42020, AluminumOre = 42033,
+        Bluestone = 42074, CrudeOil = 47001;
 
-    /// <summary>The items of each pool, by the spot's kind and tier. They follow the material lists in the names of the game's events.</summary>
+    /// <summary>
+    /// The items of each pool, by the spot's kind and tier. They follow the material lists in the names of the game's events, with an item
+    /// listed more than once to make it more common. Bluestone is the exception: no event name lists it, but the original game gave it in two
+    /// caves (by the fan wiki and WLOHub), Oslya's fourth cave (map 11047, the crude oil spot, where it was rare) and the Mayan Forest cave
+    /// behind Shasha's door (map 12161, with silvery ore and shale).
+    /// </summary>
     private static readonly FrozenDictionary<(int Kind, int Tier), ushort[]> Pools = new Dictionary<(int Kind, int Tier), ushort[]>
     {
         [(1, 1)] = [Grass, Cotton, Harl, Vine, VineGrass],
@@ -38,8 +44,8 @@ public static class GatherPools
         [(5, 2)] = [PureIronOre, CopperOre, RedClay],
         [(5, 3)] = [CopperOre, IronOre, PureIronOre, AluminumOre, Quartz],
         [(5, 4)] = [42001, 42057, BlackClay], // Gold Ore, Titanium
-        [(5, 5)] = [42005, 42054, Shale], // Silvery Ore, White Silvery Ore
-        [(6, 1)] = [47001, BlackClay], // Crude oil
+        [(5, 5)] = [42005, 42054, Shale, Bluestone], // Silvery Ore, White Silvery Ore
+        [(6, 1)] = [CrudeOil, CrudeOil, CrudeOil, CrudeOil, BlackClay, BlackClay, BlackClay, BlackClay, Bluestone], // Bluestone 1 in 9
         [(7, 1)] = [60001], // Sea Water
         [(7, 2)] = [60002], // Fresh Water
         [(8, 1)] = [42050, RedClay, BlackClay], // White Crystal

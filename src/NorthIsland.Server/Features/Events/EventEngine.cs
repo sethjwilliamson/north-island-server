@@ -72,6 +72,9 @@ public sealed partial class EventEngine(
     /// <summary>Trigger code (action 20 sub code) for a click on an NPC.</summary>
     public const byte TriggerClick = 1;
 
+    /// <summary>Trigger code (action 20 sub code) for walking up to an NPC that starts its event when the player comes near.</summary>
+    public const byte TriggerNear = 2;
+
     /// <summary>Trigger code (action 20 sub code) for stepping on an area; field encounters also start their runs with it.</summary>
     public const byte TriggerArea = 3;
 
@@ -83,7 +86,8 @@ public sealed partial class EventEngine(
 
     /// <summary>
     /// Starts the event of a clicked NPC or a door the player used: queues its condition groups and runs the first. Inside a house the door
-    /// leaves the house instead.
+    /// leaves the house instead. A trigger is refused in a battle, for an NPC or door that does not start events that way, for an NPC
+    /// hidden for good, and out of reach (<see cref="Refusal"/>).
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="trigger">The trigger code.</param>
@@ -91,9 +95,23 @@ public sealed partial class EventEngine(
     public void Start(GameSession session, byte trigger, int index)
     {
         var character = session.ActiveCharacter!;
+        if (session.Battle is not null || session.Watching is not null)
+        {
+            // the run of an event battle waits for its outcome: it stays, and the client hears nothing of it
+            logger.LogWarning("[{Session}] trigger {Trigger} index {Index} in a battle, refused", session.Id, trigger, index);
+            if (session.Event is null)
+                session.Send(EventMessages.Finished());
+            return;
+        }
         if (session.Event is { } previous)
             logger.LogInformation("[{Session}] new trigger replaces the running event of {Source}", session.Id, previous.Source);
         session.Event = null;
+        if (trigger is not (TriggerClick or TriggerNear or TriggerDoorClick or TriggerDoorWalk))
+        {
+            logger.LogWarning("[{Session}] trigger {Trigger} index {Index}: no such trigger, refused", session.Id, trigger, index);
+            session.Send(EventMessages.Finished());
+            return;
+        }
 
         if (TentHandlers.IsHouseMap(character.MapId))
         {
@@ -116,6 +134,13 @@ public sealed partial class EventEngine(
         }
 
         var name = source is EveNpc npc ? $"NPC {index} (npc {npc.NpcId})" : $"door {index}";
+        if (Refusal(session, character, scene, source, trigger, index) is { } refused)
+        {
+            logger.LogWarning("[{Session}] {Source} on map {Map} by trigger {Trigger} at ({X}, {Y}): {Why}, refused", session.Id, name,
+                character.MapId, trigger, character.X, character.Y, refused);
+            session.Send(EventMessages.Finished());
+            return;
+        }
         var run = NewRun(session, character, trigger, index, name);
         foreach (var ev in scene.EventsOf(source))
             foreach (var group in ConditionEvaluator.Groups(ev))
@@ -129,6 +154,42 @@ public sealed partial class EventEngine(
             return;
         }
         Advance(session);
+    }
+
+    /// <summary>
+    /// Finds out why a trigger may not start the events of an NPC or door: the object starts no events that way, the NPC is hidden for good
+    /// for the player, or the player is out of reach. An NPC is clicked from at most <see cref="TriggerReach.NpcClick"/> on each axis of the
+    /// places it can be, and a door from anywhere in the client's view (<see cref="TriggerReach.DoorClick"/>); the triggers sent while the
+    /// player walks (an NPC come near, a door walked into) reach as far as a walk (<see cref="TriggerReach.Walk"/>).
+    /// </summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="character">The character.</param>
+    /// <param name="scene">The scene of the player's map.</param>
+    /// <param name="source">The NPC or door.</param>
+    /// <param name="trigger">The trigger code.</param>
+    /// <param name="index">The placement index of the NPC or door.</param>
+    /// <returns>The reason, for the log; null when the trigger may start the events.</returns>
+    private static string? Refusal(GameSession session, Character character, EveScene scene, EvePlacedObject source, byte trigger, int index)
+    {
+        var events = scene.EventsOf(source).ToList();
+        if (source is EveDoor door)
+        {
+            if (trigger == TriggerDoorClick && !events.Exists(e => (e.Flags & 1) != 0)) // event flag 1: a click inside the door starts it
+                return "the door is not clicked";
+            var doorReach = trigger == TriggerDoorClick ? TriggerReach.DoorClick : TriggerReach.Walk;
+            return TriggerReach.Of(door).Reaches(character.X, character.Y, doorReach, doorReach) ? null : "out of reach";
+        }
+        var npc = (EveNpc)source;
+        // event flag 2: the event starts when the player comes near; the client does that only for an NPC without a roaming area
+        if (trigger == TriggerNear && (World.NpcWander.Roams(npc) || !events.Exists(e => (e.Flags & 2) != 0)))
+            return "the NPC does not start near";
+        if (session.NpcVisibility.TryGetValue((ushort)index, out var shown)
+            && shown is { Shown: false, Seconds: ushort.MaxValue }) // 65535 s: hidden for good
+            return "the NPC is hidden";
+        if (session.HiddenNpcs.TryGetValue(((ushort)character.MapId, (ushort)index), out var until) && until > GameClock.UtcNow)
+            return "the NPC is hidden";
+        var reach = trigger == TriggerClick ? TriggerReach.NpcClick : TriggerReach.Walk;
+        return TriggerReach.Of(npc).Reaches(character.X, character.Y, reach, reach) ? null : "out of reach";
     }
 
     /// <summary>Creates an event run for the player on their map, with their team, instance, guild and castle state.</summary>
@@ -167,24 +228,59 @@ public sealed partial class EventEngine(
     /// <returns>The team, or just the player when they have none.</returns>
     private IReadOnlyList<int> TeamOrSelf(int playerId) => world.Teams.TeamOf(playerId) is { Count: > 0 } team ? team : [playerId];
 
-    /// <summary>Handles the client's request for the next result: goes on with the running event, or finishes at once when none runs.</summary>
+    /// <summary>
+    /// Handles the client's request for the next result: goes on with the running event, or finishes at once when none runs. Going on
+    /// closes the dialog that was open, and a minigame or battle the run still waited on counts as lost or not fought.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     public void Next(GameSession session)
     {
-        if (session.Event is null)
+        if (session.Event is not { } run)
         {
             session.Send(EventMessages.Finished());
             return;
         }
-        if (session.Event.WaitsForEntry)
+        if (run.WaitsForEntry)
         {
-            logger.LogInformation("[{Session}] {Source}: next while the map loads, ignored", session.Id, session.Event.Source);
+            logger.LogInformation("[{Session}] {Source}: next while the map loads, ignored", session.Id, run.Source);
             return;
         }
+        if (run.PendingMinigame is { } kind)
+        {
+            logger.LogWarning("[{Session}] {Source}: next before the result of minigame {Kind}, counted as lost", session.Id, run.Source, kind);
+            run.Rolls[kind] = 0;
+            run.PendingMinigame = null;
+            run.MinigameStartedUtc = null;
+        }
+        if (run.PendingBattle is { } battle)
+        {
+            logger.LogWarning("[{Session}] {Source}: next before battle {Battle} began, not fought", session.Id, run.Source, battle);
+            run.PendingBattle = null;
+        }
+        run.OpenInteract = null;
         Advance(session);
     }
 
-    /// <summary>Records the player's answer to the dialog that is open; the next conditions of the run read it.</summary>
+    /// <summary>
+    /// Ends the player's running event as they leave their map: what the run opened (dialogs, stores, service windows) belongs to the map
+    /// left. The run stays while its own warp moves the player, and while it waits for a move inside its map to load when the player is
+    /// moved there again (a team leader's door taking a member along who went through it first). The results of the run's group were
+    /// applied when it was taken, so nothing is lost.
+    /// </summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="warp">Where the player goes.</param>
+    public void LeaveMap(GameSession session, DoorWarp warp)
+    {
+        if (session.Event is not { } run || run.Warping || run.WaitsForEntry && warp.MapId == run.MapId)
+            return;
+        logger.LogInformation("[{Session}] {Source}: the player leaves map {Map}, the event ends", session.Id, run.Source, run.MapId);
+        session.Event = null;
+    }
+
+    /// <summary>
+    /// Records the player's answer to the dialog that is open; the next conditions of the run read it. An answer to the open store closes it
+    /// (<see cref="OpenServices"/>).
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="code">The answer code.</param>
     public void Answer(GameSession session, int code)
@@ -196,6 +292,7 @@ public sealed partial class EventEngine(
         }
         run.Answer = (interact, code);
         run.OpenInteract = null;
+        OpenServices.CloseStore(session, interact); // a store dialog answers only when it closes
         logger.LogInformation("[{Session}] {Source}: answer {Code} to dialog {Interact}", session.Id, run.Source, code, interact);
 
         if (run.MapId == EventArenas.LobbyMapId && EventArenas.ActivityOfAnswer(interact, code) is { } activity
@@ -212,6 +309,7 @@ public sealed partial class EventEngine(
     {
         run.Groups.Clear();
         run.Pending.Clear();
+        run.Steps.Clear();
         run.Pending.Enqueue(new EveScriptRecord(1, 2, role, 1, EventArenas.NotOpenTalk, 0, 0, 0, 1, 0)); // 2 Kind
         if (EventArenas.HoursTalk(activity) is not 0 and var hours)
             run.Pending.Enqueue(new EveScriptRecord(2, 2, role, 1, hours, 0, 0, 0, 1, 0)); // 2 Step, 2 Kind
@@ -240,7 +338,10 @@ public sealed partial class EventEngine(
     /// <returns>A function from the event index to the time.</returns>
     private Func<int, DateTime> ScriptClock(int mapId) => ev => calendar.ScriptNow(mapId, ev);
 
-    /// <summary>Handles the end of a minigame: frees the client and stores the result for the conditions of the running event.</summary>
+    /// <summary>
+    /// Handles the end of a minigame: frees the client and stores the result for the conditions of the running event, once for each start
+    /// the server sent. A win is kept as 1 and counts as lost when it came sooner than the game can be won (<see cref="SportPlay"/>).
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="result">The result the client reported; 0 means lost.</param>
     public void MinigameEnded(GameSession session, int result)
@@ -259,14 +360,24 @@ public sealed partial class EventEngine(
             logger.LogInformation("[{Session}] minigame result {Result} with no minigame running", session.Id, result);
             return;
         }
-        run.Rolls[kind] = result;
+        var played = GameClock.UtcNow - (run.MinigameStartedUtc ?? GameClock.UtcNow);
+        var counted = SportPlay.Counted(kind, result, played);
+        if (result > 0 && counted == 0)
+            logger.LogWarning("[{Session}] {Source}: minigame {Kind} won after {Seconds:0.0} s, sooner than {Least} s; counted as lost", session.Id,
+                run.Source, kind, played.TotalSeconds, SportPlay.Least(kind).TotalSeconds);
+        else if (result > counted)
+            logger.LogWarning("[{Session}] {Source}: minigame {Kind} result {Result} kept as {Counted}", session.Id, run.Source, kind, result,
+                counted);
+        run.Rolls[kind] = counted;
         run.PendingMinigame = null;
-        logger.LogInformation("[{Session}] {Source}: minigame {Kind} {Outcome}", session.Id, run.Source, kind, result != 0 ? "won" : "lost");
+        run.MinigameStartedUtc = null;
+        logger.LogInformation("[{Session}] {Source}: minigame {Kind} {Outcome}", session.Id, run.Source, kind, counted != 0 ? "won" : "lost");
     }
 
     /// <summary>
-    /// Runs the results of the session's event one after the other, and the next condition groups that hold when they are used up, until one
-    /// needs the client or the event ends.
+    /// Runs the steps of the session's event one after the other, and the next condition groups that hold when they are used up, until one
+    /// needs the client or the event ends. Each stretch of a group's results up to a barrier is applied first (<see cref="CommitSegment"/>),
+    /// so its server changes are made even when the player leaves the run halfway; the steps then only show them.
     /// </summary>
     /// <param name="session">The player's session.</param>
     private void Advance(GameSession session)
@@ -275,13 +386,22 @@ public sealed partial class EventEngine(
         var character = session.ActiveCharacter!;
         while (true)
         {
-            if (!run.Pending.TryDequeue(out var record))
+            // a stretch made only of applied results leaves no step: take the next, so a barrier left in Pending is not passed by
+            while (run.Steps.Count == 0 && run.Pending.Count > 0)
+                CommitSegment(session, run, character);
+            if (!run.Steps.TryDequeue(out var step))
             {
                 if (NextGroup(session, run, character) || RestoreActedNpcs(session, run))
                     continue;
                 break;
             }
+            if (step.Shown is { } shown) // a result applied already: show it and wait for the client
+            {
+                SendRecord(session, run, shown);
+                return;
+            }
 
+            var record = step.Record;
             var mapped = ResultMapper.Map(record);
             switch (mapped.Action)
             {
@@ -327,6 +447,9 @@ public sealed partial class EventEngine(
                     {
                         run.OpenInteract = mapped.Wire.DataId;
                         run.Answer = null;
+                        // a store dialog stays open after the run ends (a click on the world ends it): its buys are served by the record
+                        if (ShopHandlers.IsStore(maps.Scene(run.MapId)?.Interacts.FirstOrDefault(i => i.Index == mapped.Wire.DataId)))
+                            OpenServices.Open(session, character, ServiceWindow.Store, run.MapId, mapped.Wire.DataId);
                     }
                     return;
 
@@ -353,9 +476,17 @@ public sealed partial class EventEngine(
                     // a Carnie exit (Carnie's own door or the entrance hall's) takes the player back to where they came to Carnie from,
                     // when that place was kept
                     var carnieBack = session.ActiveCharacter is { } visitor ? CarnieReturn.Exit(visitor, run.MapId, target) : null;
-                    world.ChangeMap(session, carnieBack is not null && maps.InstanceOfMap(carnieBack.MapId) is null ? carnieBack
-                        : new DoorWarp(target, (ushort)Math.Clamp(convey.X, 0, ushort.MaxValue), (ushort)Math.Clamp(convey.Y, 0, ushort.MaxValue),
-                            (ushort)convey.Index));
+                    run.Warping = true;
+                    try
+                    {
+                        world.ChangeMap(session, carnieBack is not null && maps.InstanceOfMap(carnieBack.MapId) is null ? carnieBack
+                            : new DoorWarp(target, (ushort)Math.Clamp(convey.X, 0, ushort.MaxValue), (ushort)Math.Clamp(convey.Y, 0, ushort.MaxValue),
+                                (ushort)convey.Index));
+                    }
+                    finally
+                    {
+                        run.Warping = false;
+                    }
                     if (target == run.MapId)
                     {
                         // A move inside the map: the group's later results (show NPCs, marks, items) still belong to this map,
@@ -370,42 +501,10 @@ public sealed partial class EventEngine(
                     while (run.Pending.TryDequeue(out var rest))
                     {
                         var after = ResultMapper.Map(rest);
-                        if (after.Action != ResultAction.Mark)
-                            continue;
-                        var done = ApplyMark(session, character, rest);
-                        logger.LogInformation(
-                            "[{Session}] {Source}: {What} (now {Count}) after the warp",
-                            session.Id,
-                            run.Source,
-                            after.Description,
-                            character.MarkCount(rest.SubKind));
-                        if (done && marks.Stars(rest.SubKind) is var paidStars and > 0)
-                        {
-                            var star = ResultMapper.Map(new EveScriptRecord(rest.Step, 1, 1, 1, StarItem, 0, paidStars, 0, 0, 0));
-                            var paid = ApplyItem(session, character, run, star with { Description = $"{star.Description} for finishing the quest" });
-                            if (paid > 0)
-                                SendRecord(session, run, star.Wire with { Value = paid });
-                        }
+                        if (after.Action == ResultAction.Mark && ApplyResult(session, character, run, rest, after) is { } paid)
+                            SendRecord(session, run, paid);
                     }
                     run.Groups.Clear();
-                    break;
-
-                case ResultAction.Item: // give or take an item, telling the client when one was given
-                    var given = ApplyItem(session, character, run, mapped);
-                    if (given > 0)
-                    {
-                        SendRecord(session, run, mapped.Wire with { Value = given });
-                        return;
-                    }
-                    break;
-
-                case ResultAction.Gold: // change the player's gold and tell the client
-                    var gold = (int)Math.Clamp((long)character.Gold + mapped.Wire.Value, 0, int.MaxValue);
-                    var change = gold - character.Gold;
-                    character.Gold = gold;
-                    if (change != 0)
-                        session.Send(Protocol.Messages.Player.PlayerMessages.MoneyChange(change));
-                    logger.LogInformation("[{Session}] {Source}: {What} (now {Gold})", session.Id, run.Source, mapped.Description, gold);
                     break;
 
                 case ResultAction.Service when mapped.Service == Career.ServiceCode: // open the career form
@@ -449,6 +548,7 @@ public sealed partial class EventEngine(
                     break;
 
                 case ResultAction.PointStore: // open the point store with the rows collected so far, then pause
+                    OpenServices.Open(session, character, ServiceWindow.PointStore, run.MapId, rows: run.PointStoreRows);
                     mall.OpenPointStore(session, run.PointStoreRows);
                     session.Send(EventMessages.StopWaiting());
                     run.Started = true;
@@ -460,7 +560,7 @@ public sealed partial class EventEngine(
                     break;
 
                 case ResultAction.Service: // open another service window, or skip it when not implemented
-                    if (services.Open(session, mapped.Service))
+                    if (services.Open(session, mapped.Service)) // each opener records the window it opens
                     {
                         session.Send(EventMessages.StopWaiting());
                         run.Started = true;
@@ -486,10 +586,6 @@ public sealed partial class EventEngine(
                     break;
                 }
 
-                case ResultAction.RoleChange: // change the role
-                    ChangeRole(session, character, run, (byte)mapped.Service);
-                    break;
-
                 case ResultAction.Packet: // send the prepared packet, if it has any bytes
                     if (mapped.Packet is { Length: > 0 })
                         session.Send(mapped.Packet);
@@ -500,6 +596,7 @@ public sealed partial class EventEngine(
                     session.Send(EventMessages.SportStart((byte)mapped.Service, (ushort)Math.Clamp(mapped.Wire.Value, 0, ushort.MaxValue), mapped.Wire.Option));
                     session.Send(EventMessages.StopWaiting());
                     run.PendingMinigame = mapped.Service;
+                    run.MinigameStartedUtc = GameClock.UtcNow;
                     run.Started = true;
                     logger.LogInformation("[{Session}] {Source}: {What}", session.Id, run.Source, mapped.Description);
                     return;
@@ -520,95 +617,213 @@ public sealed partial class EventEngine(
                     logger.LogInformation("[{Session}] {Source}: {What}", session.Id, run.Source, mapped.Description);
                     break;
 
-                case ResultAction.Amity: // the amity of a team NPC changes
-                    TeamNpcAmity(session, character, run, npcId: (ushort)mapped.Service, change: mapped.Convey);
-                    break;
-
-                case ResultAction.TeamNpc: // an NPC joins or leaves the team
-                    TeamNpc(session, character, run, npcId: (ushort)mapped.Service, joins: mapped.Convey == 1);
-                    break;
-
-                case ResultAction.Hire: // charge the hire tier; a refusal talk is shown on click
-                    run.HireTier = Hire(session, character, run, mapped.Service);
-                    if (run.HireTier == 0 && run.Trigger == TriggerClick && HireTiers.Find(mapped.Service) is { RefusalTalk: > 0 } refused)
-                    {
-                        SendRecord(session, run, new EventResult(1, 3, (ushort)run.Index, 1, 0, (ushort)refused.RefusalTalk)); // 3 Mode
-                        return;
-                    }
-                    break;
-
-                case ResultAction.Exp: // give experience
-                    experience.Gain(session, mapped.Service);
-                    logger.LogInformation("[{Session}] {Source}: {What} (now {Exp})", session.Id, run.Source, mapped.Description, character.Exp);
-                    break;
-
-                case ResultAction.Gather when character.Skill(GatherPools.SkillFor(mapped.Service)) is null: // no skill: nothing here, and no cooldown starts
-                    logger.LogInformation("[{Session}] {Source}: {What}: the skill is missing", session.Id, run.Source, mapped.Description);
-                    run.Pending.Clear();
-                    run.Groups.Clear();
-                    SendRecord(session, run, new EventResult(1, 7, 0, 1, 0, NothingToCollectTalk)); // 7 Mode
-                    return;
-
-                case ResultAction.Gather: // the resource of a gathering spot, which also trains its skill
-                    if (PickGather(session, run, mapped) is { } resource)
-                    {
-                        var collected = ApplyItem(session, character, run, resource);
-                        if (collected > 0)
-                        {
-                            lifeSkills.Train(session, GatherPools.SkillFor(mapped.Service));
-                            SendRecord(session, run, resource.Wire with { Value = collected });
-                            return;
-                        }
-                    }
-                    break;
-
-                case ResultAction.LearnSkill: // teach the player a skill
-                    LearnSkill(session, character, run, (ushort)mapped.Service);
-                    break;
-
-                case ResultAction.Cooldown: // start a script cooldown
-                    character.StartCooldown((ushort)mapped.Service, GameClock.UtcNow, mapped.Convey);
-                    logger.LogInformation("[{Session}] {Source}: {What}", session.Id, run.Source, mapped.Description);
-                    break;
-
-                case ResultAction.Mark: // change a quest mark; pay its stars when the quest is finished
-                    var finished = ApplyMark(session, character, record);
-                    logger.LogInformation(
-                        "[{Session}] {Source}: {What} (now {Count})",
-                        session.Id,
-                        run.Source,
-                        mapped.Description,
-                        character.MarkCount(record.SubKind));
-                    if (finished && marks.Stars(record.SubKind) is var stars and > 0)
-                    {
-                        var star = ResultMapper.Map(new EveScriptRecord(record.Step, 1, 1, 1, StarItem, 0, stars, 0, 0, 0));
-                        var paid = ApplyItem(session, character, run, star with { Description = $"{star.Description} for finishing the quest" });
-                        if (paid > 0)
-                        {
-                            SendRecord(session, run, star.Wire with { Value = paid });
-                            return;
-                        }
-                    }
-                    break;
-
-                case ResultAction.InstanceGoal when run.Instance is { } instance: // add to an instance goal
-                    instanceHandlers.AddGoal(session, instance, mapped.Service, mapped.Wire.Value);
-                    break;
-
-                case ResultAction.InstanceGoalDefined when run.Instance is { } instance: // define an instance goal
-                    instanceHandlers.DefineGoal(session, instance, mapped.Service, (ushort)mapped.Convey, mapped.Wire.Value);
-                    break;
-
-                case ResultAction.InstanceGoal or ResultAction.InstanceGoalDefined: // instance goal outside an instance: skipped
-                    logger.LogInformation("[{Session}] {Source}: skipped {What} (not in an instance)", session.Id, run.Source, mapped.Description);
-                    break;
-
                 default: // any other result: skipped, not implemented
                     logger.LogInformation("[{Session}] {Source}: skipped {What} (not implemented)", session.Id, run.Source, mapped.Description);
                     break;
             }
         }
         Finish(session, run);
+    }
+
+    /// <summary>Tells whether a result changes the player's state on the server, so it is applied when its stretch of the group starts.</summary>
+    /// <param name="action">The result's action.</param>
+    /// <returns>True for items, gold, experience, gathering, skills, cooldowns, marks, team NPCs, hire charges, roles and instance goals.</returns>
+    private static bool IsApplied(ResultAction action) => action is ResultAction.Item or ResultAction.Gold or ResultAction.Exp or ResultAction.Gather
+        or ResultAction.LearnSkill or ResultAction.Cooldown or ResultAction.Mark or ResultAction.Amity or ResultAction.TeamNpc or ResultAction.Hire
+        or ResultAction.RoleChange or ResultAction.InstanceGoal or ResultAction.InstanceGoalDefined;
+
+    /// <summary>
+    /// Tells whether a result is a barrier: what comes after it waits for it (a warp, a battle, a minigame, a marriage step), so the results
+    /// after it are applied only when the run gets past it.
+    /// </summary>
+    /// <param name="action">The result's action.</param>
+    /// <returns>True for a barrier.</returns>
+    private static bool IsBarrier(ResultAction action) =>
+        action is ResultAction.Warp or ResultAction.Battle or ResultAction.Minigame or ResultAction.Marriage;
+
+    /// <summary>Tells whether a result takes something from the player: items or gold.</summary>
+    /// <param name="mapped">The mapped result.</param>
+    /// <returns>True for a take.</returns>
+    private static bool IsTake(MappedResult mapped) => mapped.Action is ResultAction.Item or ResultAction.Gold && mapped.Wire.Value < 0;
+
+    /// <summary>Tells whether a result gives the player something: items, gold, experience, a skill, a team NPC, amity, or a quest's stars.</summary>
+    /// <param name="record">The result record.</param>
+    /// <param name="mapped">The mapped result.</param>
+    /// <returns>True for a reward.</returns>
+    private bool IsReward(EveScriptRecord record, MappedResult mapped) => mapped.Action switch
+    {
+        ResultAction.Item or ResultAction.Gold => mapped.Wire.Value > 0, // items or gold given
+        ResultAction.Exp or ResultAction.Gather or ResultAction.LearnSkill => true, // experience, a gathered resource, a skill
+        ResultAction.TeamNpc => mapped.Convey == 1, // an NPC joins the team
+        ResultAction.Amity => mapped.Convey > 0, // amity gained
+        ResultAction.Mark => marks.Stars(record.SubKind) > 0, // a mark that can finish a quest paying stars
+        _ => false, // anything else gives nothing
+    };
+
+    /// <summary>
+    /// Takes the next stretch of the group's results from <see cref="EventRun.Pending"/>, up to a barrier (a barrier is a stretch of its own),
+    /// and turns it into <see cref="EventRun.Steps"/>. The takes of the stretch come first; when one of them cannot be paid in full while the
+    /// stretch gives something, the rest of the group is dropped. Then each result that changes the player's state is applied in order, and
+    /// only what the client shows of it is queued; every other result is queued to run as it is.
+    /// </summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="run">The running event.</param>
+    /// <param name="character">The character.</param>
+    private void CommitSegment(GameSession session, EventRun run, Character character)
+    {
+        List<(EveScriptRecord Record, MappedResult Mapped)> segment = [];
+        while (run.Pending.TryPeek(out var next))
+        {
+            var nextMapped = ResultMapper.Map(next);
+            if (IsBarrier(nextMapped.Action) && segment.Count > 0)
+                break;
+            run.Pending.Dequeue();
+            segment.Add((next, nextMapped));
+            if (IsBarrier(nextMapped.Action))
+                break;
+        }
+
+        // without the skill a gathering spot gives nothing and starts no cooldown: the group ends with the player's line there
+        var missing = segment.FindIndex(s => s.Mapped.Action == ResultAction.Gather
+            && character.Skill(GatherPools.SkillFor(s.Mapped.Service)) is null);
+        if (missing >= 0)
+        {
+            logger.LogInformation("[{Session}] {Source}: {What}: the skill is missing", session.Id, run.Source, segment[missing].Mapped.Description);
+            segment.RemoveRange(missing, segment.Count - missing);
+            run.Pending.Clear();
+            run.Groups.Clear();
+        }
+
+        if (segment.Exists(s => IsTake(s.Mapped)))
+        {
+            if (Unpaid(character, segment) is { } unpaid && segment.Exists(s => IsReward(s.Record, s.Mapped)))
+            {
+                logger.LogWarning("[{Session}] {Source}: the group takes {Unpaid} the player lacks; its results are dropped", session.Id,
+                    run.Source, unpaid);
+                run.Pending.Clear();
+                return;
+            }
+            foreach (var (record, mapped) in segment.Where(s => IsTake(s.Mapped)))
+                ApplyResult(session, character, run, record, mapped);
+        }
+        foreach (var (record, mapped) in segment)
+        {
+            if (IsTake(mapped))
+                continue;
+            if (!IsApplied(mapped.Action))
+                run.Steps.Enqueue(new EventStep(record));
+            else if (ApplyResult(session, character, run, record, mapped) is { } shown)
+                run.Steps.Enqueue(new EventStep(record, shown));
+        }
+        if (missing >= 0)
+            run.Steps.Enqueue(new EventStep(default, new EventResult(1, 7, 0, 1, 0, NothingToCollectTalk))); // 7 Mode
+    }
+
+    /// <summary>
+    /// Finds a take of a stretch of results that the player cannot pay in full: more of an item than their bag holds, or more gold than
+    /// they have.
+    /// </summary>
+    /// <param name="character">The character.</param>
+    /// <param name="segment">The stretch of results.</param>
+    /// <returns>A description of the first take that cannot be paid, for the log; null when all can.</returns>
+    private string? Unpaid(Character character, List<(EveScriptRecord Record, MappedResult Mapped)> segment)
+    {
+        var takes = segment.Where(s => IsTake(s.Mapped)).Select(s => s.Mapped).ToList();
+        foreach (var item in takes.Where(t => t.Action == ResultAction.Item && items[t.Wire.Target] is not null).GroupBy(t => t.Wire.Target))
+        {
+            var need = item.Sum(t => -(long)t.Wire.Value);
+            if (World.Bag.Count(character, item.Key) < need)
+                return $"item {item.Key} x{need} (has {World.Bag.Count(character, item.Key)})";
+        }
+        var gold = takes.Where(t => t.Action == ResultAction.Gold).Sum(t => -(long)t.Wire.Value);
+        return character.Gold < gold ? $"{gold} gold (has {character.Gold})" : null;
+    }
+
+    /// <summary>Applies a result that changes the player's state on the server and tells the client of the change.</summary>
+    /// <param name="session">The player's session.</param>
+    /// <param name="character">The character.</param>
+    /// <param name="run">The running event.</param>
+    /// <param name="record">The result record.</param>
+    /// <param name="mapped">The mapped result, one that <see cref="IsApplied"/> holds for.</param>
+    /// <returns>The record that shows the result in the event (an item given, a quest's stars, a hire refusal); null when it shows none.</returns>
+    private EventResult? ApplyResult(GameSession session, Character character, EventRun run, EveScriptRecord record, MappedResult mapped)
+    {
+        switch (mapped.Action)
+        {
+            case ResultAction.Item: // give or take an item, shown when one was given
+                var given = ApplyItem(session, character, run, mapped);
+                return given > 0 ? mapped.Wire with { Value = given } : null;
+
+            case ResultAction.Gold: // change the player's gold and tell the client
+                var gold = (int)Math.Clamp((long)character.Gold + mapped.Wire.Value, 0, int.MaxValue);
+                var change = gold - character.Gold;
+                character.Gold = gold;
+                if (change != 0)
+                    session.Send(Protocol.Messages.Player.PlayerMessages.MoneyChange(change));
+                logger.LogInformation("[{Session}] {Source}: {What} (now {Gold})", session.Id, run.Source, mapped.Description, gold);
+                return null;
+
+            case ResultAction.Exp: // give experience
+                experience.Gain(session, mapped.Service);
+                logger.LogInformation("[{Session}] {Source}: {What} (now {Exp})", session.Id, run.Source, mapped.Description, character.Exp);
+                return null;
+
+            case ResultAction.Gather: // the resource of a gathering spot, which also trains its skill
+                if (PickGather(session, run, mapped) is not { } resource
+                    || ApplyItem(session, character, run, resource) is not (> 0 and var collected))
+                    return null;
+                lifeSkills.Train(session, GatherPools.SkillFor(mapped.Service));
+                return resource.Wire with { Value = collected };
+
+            case ResultAction.LearnSkill: // teach the player a skill
+                LearnSkill(session, character, run, (ushort)mapped.Service);
+                return null;
+
+            case ResultAction.Cooldown: // start a script cooldown
+                character.StartCooldown((ushort)mapped.Service, GameClock.UtcNow, mapped.Convey);
+                logger.LogInformation("[{Session}] {Source}: {What}", session.Id, run.Source, mapped.Description);
+                return null;
+
+            case ResultAction.Mark: // change a quest mark; pay its stars when the quest is finished
+                var finished = ApplyMark(session, character, record);
+                logger.LogInformation("[{Session}] {Source}: {What} (now {Count})", session.Id, run.Source, mapped.Description,
+                    character.MarkCount(record.SubKind));
+                if (!finished || marks.Stars(record.SubKind) is not (> 0 and var stars))
+                    return null;
+                var star = ResultMapper.Map(new EveScriptRecord(record.Step, 1, 1, 1, StarItem, 0, stars, 0, 0, 0));
+                var paid = ApplyItem(session, character, run, star with { Description = $"{star.Description} for finishing the quest" });
+                return paid > 0 ? star.Wire with { Value = paid } : null;
+
+            case ResultAction.Amity: // the amity of a team NPC changes
+                TeamNpcAmity(session, character, run, npcId: (ushort)mapped.Service, change: mapped.Convey);
+                return null;
+
+            case ResultAction.TeamNpc: // an NPC joins or leaves the team
+                TeamNpc(session, character, run, npcId: (ushort)mapped.Service, joins: mapped.Convey == 1);
+                return null;
+
+            case ResultAction.Hire: // charge the hire tier; a refusal talk is shown on click
+                run.HireTier = Hire(session, character, run, mapped.Service);
+                return run.HireTier == 0 && run.Trigger == TriggerClick && HireTiers.Find(mapped.Service) is { RefusalTalk: > 0 } refused
+                    ? new EventResult(1, 3, (ushort)run.Index, 1, 0, (ushort)refused.RefusalTalk) // 3 Mode
+                    : null;
+
+            case ResultAction.RoleChange: // change the role
+                ChangeRole(session, character, run, (byte)mapped.Service);
+                return null;
+
+            case ResultAction.InstanceGoal when run.Instance is { } instance: // add to an instance goal
+                instanceHandlers.AddGoal(session, instance, mapped.Service, mapped.Wire.Value);
+                return null;
+
+            case ResultAction.InstanceGoalDefined when run.Instance is { } instance: // define an instance goal
+                instanceHandlers.DefineGoal(session, instance, mapped.Service, (ushort)mapped.Convey, mapped.Wire.Value);
+                return null;
+
+            default: // an instance goal outside an instance: skipped
+                logger.LogInformation("[{Session}] {Source}: skipped {What} (not in an instance)", session.Id, run.Source, mapped.Description);
+                return null;
+        }
     }
 
     /// <summary>Sends a result record to the client as the first or a following record of the run, after the server start packet for a lead run.</summary>

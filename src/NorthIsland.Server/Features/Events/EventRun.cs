@@ -70,8 +70,17 @@ public sealed class EventRun(
     /// <summary>The condition groups not yet tested.</summary>
     public Queue<ConditionGroup> Groups { get; } = new();
 
-    /// <summary>The result records of the group that holds, not yet run.</summary>
+    /// <summary>The result records of the group that holds, not yet taken into <see cref="Steps"/>.</summary>
     public Queue<EveScriptRecord> Pending { get; } = new();
+
+    /// <summary>
+    /// The steps taken from <see cref="Pending"/> whose server changes are made already: the records still to run (what the client shows,
+    /// windows, the barriers) and the displays of results already applied, in script order.
+    /// </summary>
+    public Queue<EventStep> Steps { get; } = new();
+
+    /// <summary>True while a warp of the run itself moves the player, so leaving the map does not end the run.</summary>
+    public bool Warping { get; set; }
 
     /// <summary>True once the first record has been sent to the client.</summary>
     public bool Started { get; set; }
@@ -117,6 +126,9 @@ public sealed class EventRun(
 
     /// <summary>The kind of the minigame the run started and is waiting on; null for none.</summary>
     public int? PendingMinigame { get; set; }
+
+    /// <summary>When the server sent the start of the pending minigame (UTC); null when none is pending.</summary>
+    public DateTime? MinigameStartedUtc { get; set; }
 
     /// <summary>The id of the dialog that is open and waits for an answer; null for none.</summary>
     public int? OpenInteract { get; set; }

@@ -26,4 +26,10 @@ public static class Action20
 
     /// <summary>Server to client: the client stops waiting for the server.</summary>
     public const byte StopWaiting = 9;
+
+    /// <summary>Server to client: the buy-level flow, whose choice 4 is a notice that the function is not available.</summary>
+    public const byte BuyLevelFlow = 58;
+
+    /// <summary>The choice of <see cref="BuyLevelFlow"/> that the client shows as "At present, the function is not available".</summary>
+    public const byte FunctionUnavailable = 4;
 }

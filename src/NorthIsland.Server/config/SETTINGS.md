@@ -26,6 +26,7 @@ Environment variables such as `Server__GmAccounts` override them all.
 | `LogDirectory` | The directory of the log files |
 | `AutosaveMinutes` | The minutes between autosaves; 0 or less turns them off |
 | `MonsterDropChancePercent` | The chance in percent that a defeated monster drops one item of its item list |
+| `MaxDropRankGap` | How unevenly a monster's item list is weighted: each rank an item sits above the list's lowest-ranked item halves its weight, for at most this many ranks (default 4, so the rarest item drops at least a sixteenth as often as the most common one); 0 weighs every item alike |
 | `FieldEncounterPercent` | The chance in percent that a step of a free player starts a field fight; 0 turns field fights off |
 | `ExpMultiplierCap` | The largest product of the seasonal and potion experience multipliers; 0 or less means no cap |
 | `MonsterDamageScale` | A factor applied to the damage monsters do |
@@ -34,7 +35,18 @@ Environment variables such as `Server__GmAccounts` override them all.
 | `StatPointsPerLevel` | Stat points a character gets for every level gained |
 | `SkillPointsPerLevel` | Skill points a character gets for every level gained |
 | `LogPackets` | True to log every packet in both directions, typed passwords included |
-| `GmAccounts` | Account names, separated by commas, made GMs when they log in; set it with the environment variable `Server__GmAccounts` |
+| `MaxConnections` | The most game connections open at once; a connection over it is closed at once. 0 or less means no limit |
+| `MaxConnectionsPerAddress` | The most game connections open at once from one IP address; loopback addresses are not limited. 0 or less means no limit |
+| `LoginTimeoutSeconds` | The seconds a connection has to log in, counted from when it connects or goes back to the login form, before it is closed (900, 15 minutes: the client connects before it shows the login form); 0 or less means no limit |
+| `IdleTimeoutMinutes` | The minutes a logged-in connection may send nothing before it is closed; 0 or less (the default) turns it off, since the client sends no keep-alive and a player who stands still sends nothing |
+| `OutboxPackets` | The most packets queued for one client; a client that lets more pile up (it stopped reading) is disconnected. 0 or less counts as 1 |
+| `LoginFailuresBeforeLockout` | The failed logins in LoginLockoutSeconds that lock logins out for LoginLockoutSeconds. Failures of one account name from one address lock that name out for that address only, so nobody can lock an owner out of their account; failures of any names from one address (loopback not counted) lock the address out. Across addresses, a name that failed this often only makes each of its logins wait 1 second before the password is checked, and is never refused. 0 or less counts as 1 |
+| `LoginLockoutSeconds` | The seconds in which LoginFailuresBeforeLockout failures are counted, and the seconds the lockout then lasts; 0 or less counts as 1 |
+| `LoginFailuresPerConnection` | The failed logins after which the connection is told so and closed; 0 or less counts as 1 |
+| `RegistrationsPerAddressPerHour` | The accounts one address may create by AutoRegister per hour; loopback addresses are not limited. 0 or less means no limit |
+| `LogFileMegabytes` | The size in megabytes at which a log file is closed and the day's next part (`server-yyyyMMdd.2.log` and so on) begun; 0 or less uses 100. Read once at start |
+| `LogFilesPerDay` | The most log files (parts) kept per day. Once the day's last part is full, the oldest part is deleted and the others move down one number, so new lines are never dropped and the day keeps its latest ones, up to LogFilesPerDay × LogFileMegabytes; 0 or less uses 10. Read once at start |
+| `GmAccounts` | Account names, separated by commas, made GMs when they log in; set it with the environment variable `Server__GmAccounts`. A listed name is never created by AutoRegister: a login with a listed name that has no account is refused, so log in once to create the account before listing its name |
 | `Logging` | the log filter |
 | `Logging.LogLevel` | the lowest level logged, per source |
 | `Logging.LogLevel.Default` | the server's own messages |
@@ -89,6 +101,7 @@ Environment variables such as `Server__GmAccounts` override them all.
 | `FervidityMessPercent` | The chance in percent that a Fervidity hit puts mess on a target it left standing |
 | `BuffSharePercent` | The percent of their pet's experience a player gets after buffing it |
 | `DefenceSaddleDivisor` | The divisor of the pet's defence the Defence and Spirit Saddles lend the rider |
+| `KnightSaddleSpeedPercent` | The percent of the mount's SPD a reborn Knight adds to what the mount's saddle lends (the Tenacity Saddle included); 0 turns the bonus off |
 | `FleeChancePercent` | The base chance in percent that a flee attempt succeeds |
 | `FleeSpeedWeight` | How strongly the speed lead changes the flee chance factor |
 | `FleeLevelStep` | How much each level above the enemies' average changes the flee chance factor |
@@ -107,7 +120,7 @@ Environment variables such as `Server__GmAccounts` override them all.
 
 ### Rows of `LevelDrops`
 
-Each row: Item = the item id that drops; MinLevel = the lowest monster level the row applies to; MaxLevel = the highest (0 means no upper bound); Percent = the chance in percent that a monster in the range drops the item. A monster rolls this table once, separately from its own list and the seasonal event table, and a Double Drop does not double it. The default bands follow the WLO Mobile guide; its drop rate is not known, so 0.5 is a guess.
+Each row: Item = the item id that drops; MinLevel = the lowest monster level the row applies to; MaxLevel = the highest (0 means no upper bound); Percent = the chance in percent that a monster in the range drops the item. A monster rolls this table once, separately from its own list and the seasonal event table, and a Double Drop does not double it. The default bands (50-69, 70-89, 90-109, 110+) follow the PC-era Alchemist Codex guide; the WLO Mobile guide puts the Book 3/4 split at 120 instead. No source gives the drop rate, so 0.5 is a guess.
 
 | Item | Name |
 |---|---|
@@ -182,11 +195,13 @@ Each row: Item = the item id that drops; MinLevel = the lowest monster level the
 | `Guilds.OnlineMembers` | How many members must be online together once |
 | `Guilds.SweepMinutes` | Minutes between two dismissal checks; 0 or less switches the check off |
 | `Guilds.MaxGuilds` | The most guilds the server holds; 0 means no limit |
+| `Guilds.BadgeUploadSeconds` | The seconds a guild waits between two badge uploads; 0 or less means no wait |
 | `HotSpring` | Settings of the hot springs |
 | `HotSpring.Enabled` | Switches the hot springs on or off |
 | `HotSpring.MinutesPerPoint` | Minutes in the water per bonus step |
 | `HotSpring.MaxPerVisit` | The most steps one visit gives |
 | `HotSpring.PointsPerStep` | The bonus points added to the character's maximum HP and SP per step |
+| `HotSpring.MaxTotal` | The most bonus points a character collects at the hot springs in all; the bonus is permanent, so without a cap it would grow for as long as the player bathes. 100 is ten full visits at the settings above (half an hour each). A character already above it keeps what it has and gains no more; 0 or less gives no bonus at all |
 | `Sitting` | Settings of the HP and SP recovery while sitting on the ground (the Social window's sit-down action, Alt+1 by default); the rates are guesses from forum posts |
 | `Sitting.Enabled` | Switches the recovery on or off |
 | `Sitting.TickSeconds` | Seconds between two recovery steps |
@@ -393,6 +408,34 @@ Each row: Item = the item id sold; Category = the mall tab it appears in; Price 
 | 34175 | Seasonal Suit |
 | 34176 | Rabbit Suit |
 | 34177 | Cat Suit |
+
+## Settings with no line in a file
+
+These keys of the `Server` section are not in any of the files above; the server uses the default shown. To change one, add it to
+any of the merged files (or set it with an environment variable such as `Server__Travel__WalkReachPixels`). A list given that way is
+added to the default list, not put in its place, so it can bar more maps or scene types but cannot let back in one the default bars.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `Travel` | | The rules of travel in the world |
+| `Travel.NoTeleportMaps` | 10004, 10009, 10085, 11073, 12064, 12766, 13224 | The maps no teleport may leave or reach, on top of those always barred (scene flag 4, the sea as a destination, houses, instance copies, event arenas and the castle maps): the Prison, the Maze, the Wedding Hall, the Activity Centre's 2F, the Capitol's 2F, the Altar and the Maze in Cave, which the client bars by id |
+| `Travel.WalkReachPixels` | 1640 | The farthest, in pixels on either axis, a walk may end from the player's last accepted position; a walk past it is refused and the player put back. The client walks at most 40 cells of 20 pixels and may be up to that far from its last sent end, so a fair walk ends within twice 820 pixels. 0 or less turns the check off |
+| `Chat` | | The limits of chat |
+| `Chat.MaxTextBytes` | 180 | The most bytes of text one chat line may carry; a longer line is dropped. The client's input box takes 60 characters of up to 3 bytes each. 0 or less turns the check off |
+| `Chat.BurstLines` | 5 | The most chat lines a player (not a GM) may send within Chat.BurstSeconds; the line over it is dropped, the client is told its chat is blocked and the player is silenced for Chat.BlockSeconds. 0 or less turns the limit off |
+| `Chat.BurstSeconds` | 5 | The window in seconds that Chat.BurstLines counts lines in; 0 or less counts as 1 |
+| `Chat.BlockSeconds` | 8 | The seconds a player who went over Chat.BurstLines stays silenced (the client itself holds its chat for 8 seconds once told); 0 or less silences nobody, so only the lines over the limit in the window are dropped |
+| `Chat.NoWhisperMaps` | 10701 | The maps whispers cannot be sent from (the client's own list); a whisper sent from one is not passed on |
+| `Vehicles` | | The rules of vehicles |
+| `Vehicles.NoVehicleMaps` | 10085, 12064, 12065, 12766, 10065, 10066, 10068 | The maps no vehicle may be placed or boarded on, on top of houses and the Quiz Zones: the Wedding Hall, the Capitol's 2F and 4F, the Altar and the three Trojan War rounds, as the client refuses them |
+| `Vehicles.NoVehicleSceneTypes` | 8, 9, 11, 14 | The scene types on which no vehicle may be placed or boarded, as the client refuses them (14 is the sea) |
+| `HouseLife` | | The numbers for life in the house |
+| `HouseLife.FurMailCapacity` | 0 | The most letters a character's Mailbox keeps; 0 or less keeps 100, since a box without a limit could be filled without end |
+| `HouseLife.TentReachX` | 800 | The farthest, in pixels across, a player may stand from a tent to go in by clicking it; the client sends the click from anywhere on its 800 by 600 pixel screen, so the default is the screen width. 0 or less means no limit across |
+| `HouseLife.TentReachY` | 600 | The farthest, in pixels up or down, a player may stand from a tent to go in by clicking it: by default the screen height. 0 or less means no limit up or down |
+| `AnswerSeconds` | 120 | The seconds both partners have to say yes to a marriage application or a divorce form before it is dropped; 0 or less counts as 1 |
+| `QuizStartSeconds` | 15 | The seconds the Q&A waits after its first player joins before it asks the first question; players can join only in this time. 0 or less starts at once, so only the first player is in |
+| `QuestAbandon` | false | True to let a player give up a quest going on. Off by default: the game's quest window never shows its Delete button, so the normal client never asks, and a quest given up could be done again, with what its steps hand out |
 
 ## events.json
 

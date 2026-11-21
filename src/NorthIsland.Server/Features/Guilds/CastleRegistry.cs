@@ -83,17 +83,30 @@ public sealed class CastleRegistry
     public const ushort RewardFlag = 50199; // Guild war treasure given
 
     /// <summary>
-    /// Marks the weekly castle reward as taken for the current ISO week when the player belongs to the owning guild and has not taken it yet.
+    /// Marks the weekly castle reward as taken for the current ISO week when the player belongs to the owning guild and their account has not taken
+    /// it yet; guild membership is per account, so the reward is too. Entries of earlier weeks are dropped and the state is saved.
     /// </summary>
     /// <param name="playerId">The player's login id.</param>
-    /// <param name="character">The player's character; its <c>CastleRewardWeek</c> is updated.</param>
+    /// <param name="character">
+    /// The player's character; a <c>CastleRewardWeek</c> of this week, saved before the reward was kept per account, also counts as taken, and it is
+    /// updated.
+    /// </param>
     /// <param name="now">The current time, which decides the week.</param>
-    /// <returns>True when the reward is due now, false when it was already taken this week or the player is not in the owning guild.</returns>
+    /// <returns>True when the reward is due now, false when the account already took it this week or the player is not in the owning guild.</returns>
     public bool TakeWeeklyReward(int playerId, Data.Character character, DateTime now)
     {
-        var week = System.Globalization.ISOWeek.GetYear(now) * 100 + System.Globalization.ISOWeek.GetWeekOfYear(now);
+        var week = System.Globalization.ISOWeek.GetYear(now) * 100 + System.Globalization.ISOWeek.GetWeekOfYear(now); // year * 100 + week
         if (character.CastleRewardWeek == week || !IsOwnerMember(playerId))
             return false;
+        lock (_lock)
+        {
+            if (_state.RewardWeeks.TryGetValue(playerId, out var taken) && taken == week)
+                return false;
+            foreach (var stale in _state.RewardWeeks.Where(w => w.Value != week).Select(w => w.Key).ToList())
+                _state.RewardWeeks.Remove(stale);
+            _state.RewardWeeks[playerId] = week;
+            _documents.Save(Document, _state);
+        }
         character.CastleRewardWeek = week;
         return true;
     }

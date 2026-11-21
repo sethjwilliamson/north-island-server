@@ -73,6 +73,55 @@ public sealed class ServerOptions
     /// <summary>True to log every packet in both directions.</summary>
     public bool LogPackets { get; set; }
 
+    /// <summary>The most game connections open at once; a connection over it is closed at once. 0 or less for no limit.</summary>
+    public int MaxConnections { get; set; } = 2000;
+
+    /// <summary>The most game connections open at once from one address; loopback addresses are not limited. 0 or less for no limit.</summary>
+    public int MaxConnectionsPerAddress { get; set; } = 10;
+
+    /// <summary>The seconds a connection has to log in, from when it connects or goes back to the login form; 0 or less for no limit.</summary>
+    public int LoginTimeoutSeconds { get; set; } = 900; // 15 minutes: the client connects before the login form, where a player may sit a while
+
+    /// <summary>
+    /// The minutes a logged-in connection may send nothing before it is closed; 0 or less turns it off (the default: the client sends no
+    /// keep-alive, so a player who stands still sends nothing).
+    /// </summary>
+    public int IdleTimeoutMinutes { get; set; }
+
+    /// <summary>
+    /// The most packets queued for one client; a client that lets more pile up (it stopped reading) is disconnected. 0 or less counts as 1.
+    /// </summary>
+    public int OutboxPackets { get; set; } = 8192;
+
+    /// <summary>
+    /// The failed logins that lock out further logins for <see cref="LoginLockoutSeconds"/>: of one account name from one address (that name is
+    /// locked out for that address only), or from one address over any names (the address is locked out; not for loopback addresses). Once a name
+    /// has this many failures over all addresses together, each of its logins only waits 1 second before the password is checked; it is never
+    /// locked out for every address. 0 or less counts as 1.
+    /// </summary>
+    public int LoginFailuresBeforeLockout { get; set; } = 10;
+
+    /// <summary>
+    /// The seconds in which <see cref="LoginFailuresBeforeLockout"/> failures lock out logins, and the seconds the lockout lasts. 0 or less counts
+    /// as 1.
+    /// </summary>
+    public int LoginLockoutSeconds { get; set; } = 300;
+
+    /// <summary>The failed logins after which a connection is closed. 0 or less counts as 1.</summary>
+    public int LoginFailuresPerConnection { get; set; } = 5;
+
+    /// <summary>The accounts one address may auto-register per hour; loopback addresses are not limited. 0 or less for no limit.</summary>
+    public int RegistrationsPerAddressPerHour { get; set; } = 5;
+
+    /// <summary>The size in megabytes at which a log file is closed and the day's next part begun. 0 or less uses the default (100).</summary>
+    public int LogFileMegabytes { get; set; } = FileLoggerProvider.DefaultFileMegabytes;
+
+    /// <summary>
+    /// The most log files (parts) kept per day; once the last is full, the day's oldest part is deleted and the others are renumbered, so that the
+    /// day's newest lines are kept and no line is dropped. 0 or less uses the default (10).
+    /// </summary>
+    public int LogFilesPerDay { get; set; } = FileLoggerProvider.DefaultFilesPerDay;
+
     /// <summary>Account names, separated by commas, that are made GMs when they log in; empty for none.</summary>
     public string GmAccounts { get; set; } = "";
 

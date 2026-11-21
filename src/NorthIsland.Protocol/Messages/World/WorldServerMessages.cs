@@ -70,6 +70,19 @@ public static class WorldServerMessages
     public static byte[] PlayerWalk(int playerId, byte direction, ushort x, ushort y) =>
         new PacketWriter(Action6.Code, Action6.WalkTo).I32(playerId).U8(direction).U16(x).U16(y).ToArray();
 
+    /// <summary>Builds the <c>7</c> packet that puts a player on a spot of their map without a walk.</summary>
+    /// <param name="playerId">Id of the player.</param>
+    /// <param name="mapId">The player's map id.</param>
+    /// <param name="x">The spot's x, px.</param>
+    /// <param name="y">The spot's y, px.</param>
+    /// <returns>The packet.</returns>
+    public static byte[] Jump(int playerId, ushort mapId, ushort x, ushort y) =>
+        new PacketWriter(Action7.Code).I32(playerId).U16(mapId).U16(x).U16(y).ToArray();
+
+    /// <summary>Builds the <c>2/8</c> packet that tells the client its chat is blocked; it holds its local chat for 8 seconds.</summary>
+    /// <returns>The packet.</returns>
+    public static byte[] ChatBlocked() => new PacketWriter(Action2.Code, Action2.ChatBlocked).ToArray();
+
     /// <summary>Builds a chat packet for a channel.</summary>
     /// <param name="channel">Channel (the sub code).</param>
     /// <param name="senderId">Id of the speaker.</param>

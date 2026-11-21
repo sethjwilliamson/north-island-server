@@ -23,6 +23,14 @@ public static class EventMessages
             .U8(0)
             .ToArray();
 
+    /// <summary>
+    /// Builds the <c>20/58</c> notice with choice 4, which the client shows as "At present, the function is not available" (its
+    /// EventNotice table) whatever window is open.
+    /// </summary>
+    /// <returns>The packet.</returns>
+    public static byte[] FunctionUnavailable() =>
+        new PacketWriter(Action20.Code, Action20.BuyLevelFlow).U8(Action20.FunctionUnavailable).ToArray();
+
     /// <summary>Builds 22/1, which sets the state of a map NPC.</summary>
     /// <param name="role">Index of the map NPC.</param>
     /// <param name="state">The new state.</param>

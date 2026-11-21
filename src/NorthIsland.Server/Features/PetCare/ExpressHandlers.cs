@@ -19,7 +19,10 @@ public sealed class ExpressHandlers(
     /// <summary>The most bag stacks one trip carries.</summary>
     public const int MaxStacks = 5;
 
-    /// <summary>Starts a trip after checking the pet, the stacks and the target; a refused check is answered with an express error.</summary>
+    /// <summary>
+    /// Starts a trip after checking the pet, the stacks (none committed elsewhere, see <see cref="BagLocks"/>) and the target; a refused check is
+    /// answered with an express error.
+    /// </summary>
     /// <param name="session">The sender's session.</param>
     /// <param name="body">The packet body: the pet's NPC id, the target's login id, then pairs of bag slot and count.</param>
     internal ValueTask OnStart(GameSession session, ReadOnlyMemory<byte> body)
@@ -39,6 +42,12 @@ public sealed class ExpressHandlers(
         if (pet is null || stacks.Count == 0 || c.ActivePetId == petId || session.Battle is not null || session.Trades.Items is not null)
         {
             logger.LogInformation("[{Session}] {Name}: express refused (pet {Pet}, {Count} stacks)", session.Id, c.Name, petId, stacks.Count);
+            return ValueTask.CompletedTask;
+        }
+        if (stacks.Select(s => (s.Slot, Why: BagLocks.LockedBy(session, s.Slot))).FirstOrDefault(l => l.Why is not null) is { Why: { } locked } at)
+        {
+            logger.LogWarning("[{Session}] {Name}: express refused, bag slot {Slot} is {Why}", session.Id, c.Name, at.Slot, locked);
+            session.Send(ExpressMessages.Error(1, c.Bag.Find(b => b.Slot == at.Slot)?.ItemId ?? 0)); // 1: a stack cannot go
             return ValueTask.CompletedTask;
         }
         if (Check(session, c, targetId, stacks) is { } refusal)
@@ -69,22 +78,30 @@ public sealed class ExpressHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Called every second: when the trip is due, checks the stacks again, delivers them and ends the trip.</summary>
+    /// <summary>
+    /// Called every second under the sender's gate: when the trip is due, takes the target's gate, checks the stacks and the target's bag again,
+    /// delivers them and ends the trip. A target whose connection ended is not online any more: its character was saved for the last time.
+    /// </summary>
     /// <param name="session">The sender's session.</param>
     public void Tick(GameSession session)
     {
-        if (session.PetJobs.Express is not { } job || job.Due > GameClock.UtcNow || session.ActiveCharacter is not { } c)
+        if (session.Closing || session.PetJobs.Express is not { } job || job.Due > GameClock.UtcNow || session.ActiveCharacter is not { } c)
             return;
-        var refusal = Check(session, c, job.TargetId, job.Stacks);
-        if (refusal is null && world.SessionOf(job.TargetId) is { } target && target.ActiveCharacter is { } tc)
+        var target = world.SessionOf(job.TargetId);
+        var held = default(GameSession.Exclusive);
+        if (target is not null && !ReferenceEquals(target, session) && !target.TryExclusive(out held))
+            return; // the target is handling a packet: check and deliver on the next tick, without waiting in the ticker
+        using (held)
         {
-            if (!target.TryExclusive(out var held)) // the target is handling a packet: deliver on the next tick
-                return;
-            using (held)
+            (byte Code, ushort Item)? refusal = target is { Closing: true } ? (2, 0) : Check(session, c, job.TargetId, job.Stacks); // 2: not online
+            if (refusal is null && ReferenceEquals(world.SessionOf(job.TargetId), target) && target!.ActiveCharacter is { } tc)
                 Deliver(session, c, target, tc, job);
+            else
+            {
+                var (code, item) = refusal ?? (2, 0); // 2: the target is not online (it logged in again on another connection meanwhile)
+                session.Send(ExpressMessages.Error(code, item));
+            }
         }
-        else if (refusal is { } r)
-            session.Send(ExpressMessages.Error(r.Code, r.Item));
         Finish(session, job);
     }
 
@@ -99,8 +116,9 @@ public sealed class ExpressHandlers(
     }
 
     /// <summary>
-    /// Checks that a trip can go: the stacks exist, the target is another online player who does not block the sender,
-    /// and the target's bag takes them.
+    /// Checks that a trip can go: the stacks exist and may change hands (not flagged no-trade, no pose, not the ridden vehicle, no crystal stone
+    /// that cannot be passed on, a known item of one cell, not the Magic Magnet, as the client's express window refuses), the target is another
+    /// online player who does not block the sender, and the target's bag takes them.
     /// </summary>
     /// <param name="session">The sender's session.</param>
     /// <param name="c">The sender's character.</param>
@@ -117,7 +135,10 @@ public sealed class ExpressHandlers(
         foreach (var (slot, count) in stacks)
         {
             var stack = c.Bag.Find(b => b.Slot == slot);
-            if (stack is null || count == 0 || stack.Count < count || Bag.IsNoTrade(items, stack) || session.Vehicle?.BagSlot == slot)
+            if (stack is null || count == 0 || stack.Count < count || Bag.IsNoTrade(items, stack) || session.Vehicle?.BagSlot == slot
+                || stack.Insert is >= HomeShopHandlers.FirstNonTransferable and <= HomeShopHandlers.LastNonTransferable
+                || items[stack.ItemId] is not { CellWidth: <= 1, CellHeight: <= 1 } // unknown or oversized: only known one-cell items
+                || stack.ItemId == MagnetHandlers.MagicMagnet)
                 return (1, stack?.ItemId ?? 0);
         }
         if (world.SessionOf(targetId) is not { } target || target.ActiveCharacter is not { } tc || targetId == session.Account!.LoginId)
@@ -136,7 +157,7 @@ public sealed class ExpressHandlers(
         return null;
     }
 
-    /// <summary>Moves the stacks from the sender's bag to the target's bag and sends both players the result.</summary>
+    /// <summary>Moves the stacks, with every attribute, from the sender's bag to the target's bag and sends both players the result.</summary>
     /// <param name="session">The sender's session.</param>
     /// <param name="c">The sender's character.</param>
     /// <param name="target">The target's session.</param>
@@ -153,25 +174,14 @@ public sealed class ExpressHandlers(
         foreach (var (slot, count) in job.Stacks)
         {
             var stack = c.Bag.Find(b => b.Slot == slot)!;
-            var (itemId, wear, insert, fusion, pose, box) = (stack.ItemId, stack.Wear, stack.Insert, stack.Fusion, stack.Pose, stack.BoxItem);
+            var itemId = stack.ItemId;
             stack.Count -= count;
             session.Send(ItemMessages.BagSlotDecrease(slot, count));
             if (stack.Count == 0)
                 c.Bag.Remove(stack);
-            foreach (var (added, n) in Bag.Add(tc, items, itemId, count, wear, insert, fusion, pose, box))
-                target.Send(
-                    ItemMessages.BagAdd(
-                        new BagEntry
-                        {
-                            Slot = added.Slot,
-                            ItemId = added.ItemId,
-                            Count = n,
-                            Wear = added.Wear,
-                            Insert = added.Insert,
-                            FusionLevel = added.Fusion,
-                            PoseItemId = added.Pose,
-                            BoxItemId = added.BoxItem
-                        }));
+            Bag.SendAdded(
+                target,
+                Bag.Add(tc, items, itemId, count, stack.Wear, stack.Insert, stack.Fusion, stack.Pose, stack.BoxItem, stack.Used, stack.Extra));
             target.Send(ExpressMessages.Result(1, myId, itemId, count));
             session.Send(ExpressMessages.Result(2, job.TargetId, itemId, count));
         }

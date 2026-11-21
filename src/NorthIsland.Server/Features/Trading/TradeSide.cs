@@ -11,15 +11,18 @@ public sealed class TradeSide(
     /// <summary>The gold offered.</summary>
     public int Gold { get; set; }
 
-    /// <summary>The bag slots offered.</summary>
-    public List<byte> BagSlots { get; } = [];
+    /// <summary>
+    /// Copies of the bag stacks offered, taken when the offer was made: each keeps its bag slot, count and every attribute, so the trade can check
+    /// the slot still holds the very stack the partner was shown.
+    /// </summary>
+    public List<BagItem> Stacks { get; } = [];
 
-    /// <summary>The slot of the pet offered, 0 for none.</summary>
-    public byte PetSlot { get; set; }
+    /// <summary>The pet offered, or null for none; the trade checks this same pet is still in the team.</summary>
+    public Pet? Pet { get; set; }
 
     /// <summary>Whether an offer has been made.</summary>
     public bool Offered { get; set; }
 
-    /// <summary>Whether this side has confirmed the current offer; a new offer clears it.</summary>
+    /// <summary>Whether this side has confirmed the current offers; an offer from either side after that cancels the trade.</summary>
     public bool Confirmed { get; set; }
 }

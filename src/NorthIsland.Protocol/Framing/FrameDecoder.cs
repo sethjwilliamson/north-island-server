@@ -6,8 +6,11 @@ public sealed class FrameDecoder
     /// <summary>The decoded bytes not yet consumed.</summary>
     private byte[] _buffer = new byte[4096];
 
-    /// <summary>The number of valid bytes in the buffer.</summary>
+    /// <summary>The number of valid bytes in the buffer, counted from its start.</summary>
     private int _count;
+
+    /// <summary>The offset of the first byte not yet consumed; the bytes before it are dropped when the next bytes are fed.</summary>
+    private int _start;
 
     /// <summary>The number of bytes dropped while looking for a frame header.</summary>
     public long SkippedBytes { get; private set; }
@@ -16,6 +19,7 @@ public sealed class FrameDecoder
     /// <param name="raw">The bytes as received.</param>
     public void Feed(ReadOnlySpan<byte> raw)
     {
+        Compact();
         EnsureCapacity(_count + raw.Length);
         var dest = _buffer.AsSpan(_count, raw.Length);
         raw.CopyTo(dest);
@@ -23,37 +27,42 @@ public sealed class FrameDecoder
         _count += raw.Length;
     }
 
-    /// <summary>Takes the next complete frame's payload out of the buffer, dropping two bytes at a time while the header is not valid.</summary>
+    /// <summary>
+    /// Takes the next complete frame's payload out of the buffer, dropping two bytes at a time while the header is not valid. Consuming only moves
+    /// an offset, so skipping junk costs no copy per skipped pair; the buffer is compacted once, when the next bytes are fed.
+    /// </summary>
     /// <returns>The payload, or null when no complete frame is buffered.</returns>
     public byte[]? NextPayload()
     {
-        while (_count >= FrameCodec.HeaderSize)
+        while (_count - _start >= FrameCodec.HeaderSize)
         {
-            if (_buffer[0] != FrameCodec.Magic0 || _buffer[1] != FrameCodec.Magic1)
+            if (_buffer[_start] != FrameCodec.Magic0 || _buffer[_start + 1] != FrameCodec.Magic1)
             {
-                Consume(2);
+                _start += 2; // the header is looked for two bytes at a time
                 SkippedBytes += 2;
                 continue;
             }
 
-            var length = _buffer[2] | (_buffer[3] << 8);
-            if (_count - FrameCodec.HeaderSize < length)
+            var length = _buffer[_start + 2] | (_buffer[_start + 3] << 8); // u16 little-endian length after the two magic bytes
+            if (_count - _start - FrameCodec.HeaderSize < length)
                 break;
 
-            var payload = _buffer.AsSpan(FrameCodec.HeaderSize, length).ToArray();
-            Consume(FrameCodec.HeaderSize + length);
+            var payload = _buffer.AsSpan(_start + FrameCodec.HeaderSize, length).ToArray();
+            _start += FrameCodec.HeaderSize + length;
             return payload;
         }
 
         return null;
     }
 
-    /// <summary>Removes the first bytes from the buffer.</summary>
-    /// <param name="n">The number of bytes.</param>
-    private void Consume(int n)
+    /// <summary>Moves the bytes not yet consumed to the start of the buffer.</summary>
+    private void Compact()
     {
-        _count -= n;
-        _buffer.AsSpan(n, _count).CopyTo(_buffer);
+        if (_start == 0)
+            return;
+        _buffer.AsSpan(_start, _count - _start).CopyTo(_buffer);
+        _count -= _start;
+        _start = 0;
     }
 
     /// <summary>Grows the buffer so that it holds at least a number of bytes.</summary>

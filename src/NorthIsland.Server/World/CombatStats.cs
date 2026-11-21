@@ -47,6 +47,9 @@ public sealed class CombatStats(
         (25625, 3), // Spirit Saddle
         (25208, 4)]; // Swift Saddle
 
+    /// <summary>Item id of the Tenacity Saddle, which lends the rider a third of the ridden pet's max HP.</summary>
+    public const ushort TenacitySaddle = 25641; // Tenacity Saddle
+
     /// <summary>Adds up the bonus of one attribute over the worn items that are not destroyed, with their inserted stone and fusion.</summary>
     /// <param name="equipment">The worn items.</param>
     /// <param name="attr">The item attribute id.</param>
@@ -59,11 +62,15 @@ public sealed class CombatStats(
     /// <param name="c">The character.</param>
     public void Recalculate(Character c) => formulas.Recalculate(c, MaxBonus(c, AttrMaxHpBonus), MaxBonus(c, AttrMaxSpBonus));
 
-    /// <summary>The bonus of an attribute from the worn items, plus the character's spring bonus for max HP and max SP.</summary>
+    /// <summary>
+    /// The bonus of an attribute from the worn items, plus the character's spring bonus for max HP and max SP, plus what a ridden pet's Tenacity
+    /// Saddle lends for max HP.
+    /// </summary>
     /// <param name="c">The character.</param>
     /// <param name="attr">The attribute id.</param>
     /// <returns>The bonus.</returns>
-    public int MaxBonus(Character c, byte attr) => Bonus(c.Equipment, attr) + (attr is AttrMaxHpBonus or AttrMaxSpBonus ? c.SpringBonus : 0);
+    public int MaxBonus(Character c, byte attr) =>
+        Bonus(c.Equipment, attr) + (attr is AttrMaxHpBonus or AttrMaxSpBonus ? c.SpringBonus : 0) + (attr == AttrMaxHpBonus ? RidingHp(c) : 0);
 
     /// <summary>The attribute ids whose pet bonuses are sent to the client.</summary>
     private static readonly ImmutableArray<byte> PetBonusAttrs = [
@@ -178,10 +185,14 @@ public sealed class CombatStats(
         return [.. Enumerable.Range(0, 5).Select(i => f.CombatValue(i, npc.Level, stats[i], 0, ElementMatches(i, npc.Element), false))];
     }
 
-    /// <summary>The riding extra of each of the five values: a share of the ridden pet's value for each saddle it wears.</summary>
+    /// <summary>
+    /// The riding extra of each of the five values: a share of the ridden pet's value for each saddle it wears (a third, or for the Defence and
+    /// Spirit Saddles <see cref="BattleOptions.DefenceSaddleDivisor"/>), plus the reborn Knight's share of the pet's SPD.
+    /// </summary>
+    /// <param name="c">The rider.</param>
     /// <param name="ridden">The pet being ridden, null on foot.</param>
     /// <returns>The five extras, all 0 on foot.</returns>
-    public int[] RidingExtras(Pet? ridden)
+    public int[] RidingExtras(Character c, Pet? ridden)
     {
         var extras = new int[5];
         if (ridden is null)
@@ -189,9 +200,27 @@ public sealed class CombatStats(
         var pet = PetValues(ridden);
         foreach (var (saddle, value) in Saddles)
             if (ridden.Equipment.Exists(e => e.ItemId == saddle))
-                extras[value] = pet[value] / (value is 1 or 3 ? Math.Max(1, options.Value.DefenceSaddleDivisor) : 3);
+                extras[value] = pet[value] / (value is 1 or 3 ? Math.Max(1, options.Value.DefenceSaddleDivisor) : 3) + KnightSaddleBonus(c, pet);
         return extras;
     }
+
+    /// <summary>The max HP a ridden pet's Tenacity Saddle lends the rider: a third of the pet's max HP, plus the reborn Knight's share of its SPD.</summary>
+    /// <param name="c">The rider.</param>
+    /// <returns>The extra max HP; 0 on foot or when the pet wears no Tenacity Saddle.</returns>
+    public int RidingHp(Character c) =>
+        Ridden(c) is { } ridden && ridden.Equipment.Exists(e => e.ItemId == TenacitySaddle) ? ridden.MaxHp / 3 + KnightSaddleBonus(c, PetValues(ridden)) : 0;
+
+    /// <summary>
+    /// What a reborn Knight adds to the value its mount's saddle lends: <see cref="BattleOptions.KnightSaddleSpeedPercent"/> of the mount's SPD,
+    /// rounded.
+    /// </summary>
+    /// <param name="c">The rider.</param>
+    /// <param name="pet">The ridden pet's five values.</param>
+    /// <returns>The bonus; 0 for anyone but a reborn Knight.</returns>
+    private int KnightSaddleBonus(Character c, int[] pet) =>
+        c.RebornCount > 0 && c.Job == Career.Knight
+            ? (int)Math.Round(pet[SpeedIndex] * options.Value.KnightSaddleSpeedPercent / 100.0, MidpointRounding.AwayFromZero)
+            : 0;
 
     /// <summary>Whether the element is the one that boosts a value (3 for ATK and MATK, 1 for DEF and MDEF, 4 for SPD).</summary>
     /// <param name="value">The value index: 0 ATK, 1 DEF, 2 MATK, 3 MDEF, 4 SPD.</param>
@@ -216,7 +245,7 @@ public sealed class CombatStats(
         if (formulas.Table is not { } f)
             return new int[5];
         var level = FormulaTable.TotalLevel(c.Level, c.RebornCount);
-        var extras = RidingExtras(ridden);
+        var extras = RidingExtras(c, ridden);
         int[] stats = [c.Strength, c.Constitution, c.Intelligence, c.Wisdom, c.Agility];
         bool Job(int i) => i switch
         {
@@ -245,8 +274,12 @@ public sealed class CombatStats(
     /// <summary>Finds the pet the session's character is riding.</summary>
     /// <param name="session">The player's session.</param>
     /// <returns>The pet, or null when on foot.</returns>
-    public static Pet? Ridden(GameSession session) =>
-        session.RidingPetSlot == 0 ? null : session.ActiveCharacter?.Pets.Find(p => p.Slot == session.RidingPetSlot);
+    public static Pet? Ridden(GameSession session) => session.ActiveCharacter is { } c ? Ridden(c) : null;
+
+    /// <summary>Finds the pet a character is riding.</summary>
+    /// <param name="c">The character.</param>
+    /// <returns>The pet, or null when on foot.</returns>
+    public static Pet? Ridden(Character c) => c.RidingPetSlot == 0 ? null : c.Pets.Find(p => p.Slot == c.RidingPetSlot);
 
     /// <summary>
     /// Recalculates the character's values and sends the client the max bonuses, changed HP and SP, the riding extras and
@@ -280,7 +313,7 @@ public sealed class CombatStats(
         if (c.Sp != sp)
             session.Send(InnMessages.SetAttribute(Action8.AttrSp, c.Sp));
         var ridden = Ridden(session);
-        var extras = RidingExtras(ridden);
+        var extras = RidingExtras(c, ridden);
         for (var i = 0; i < extras.Length; i++)
             session.Send(InnMessages.SetAttribute(RidingExtraAttrs[i], extras[i]));
         var values = Values(c, ridden);

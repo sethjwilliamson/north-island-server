@@ -27,6 +27,51 @@ public sealed class HomeShopHandlers(
     /// </summary>
     public const int ShelfPositions = 5, VendingRows = 5, ShelfIds = 50, VendingIds = 20, MaxPrice = 9999999;
 
+    /// <summary>The item ids of the first and last magic crystal stones that cannot be passed on with the item they are set into.</summary>
+    public const ushort FirstNonTransferable = 61063, LastNonTransferable = 61078; // 61063 Morning Star Crystal, 61078 Charm Crystal
+
+    /// <summary>
+    /// Returns why a bag stack cannot be sold from a house shop or egg machine, by the client's rules (StallDropRules, EggSellWindow), or null
+    /// when it can: an item that cannot be traded or has a pose (<see cref="Bag.IsNoTrade"/>), a magic crystal stone that cannot be passed on, a
+    /// vehicle or the ridden vehicle, or a tent.
+    /// </summary>
+    /// <param name="items">The item data, for the flags and types.</param>
+    /// <param name="session">The owner's session, for the ridden vehicle.</param>
+    /// <param name="stack">The bag stack.</param>
+    /// <returns>The reason as log text; null when the stack may be sold.</returns>
+    internal static string? SaleRefusal(ItemData items, GameSession session, BagItem stack) =>
+        Bag.IsNoTrade(items, stack) ? "it cannot be traded"
+            : stack.Insert is >= FirstNonTransferable and <= LastNonTransferable ? "its crystal stone cannot be passed on"
+                : session.Vehicle?.BagSlot == stack.Slot || items[stack.ItemId]?.Type == Bag.VehicleType ? "it is a vehicle"
+                    : items[stack.ItemId]?.Type == TentHandlers.TentItemType ? "it is a tent"
+                        : null;
+
+    /// <summary>
+    /// Whether a bag stack is still the stack an offer was made from: the same item with every attribute the same, by the bag's own rule
+    /// (<see cref="GridStore.Same"/>).
+    /// </summary>
+    /// <param name="bag">The bag stack.</param>
+    /// <param name="offer">The offer.</param>
+    /// <returns>True when they match.</returns>
+    private static bool Matches(BagItem bag, StockItem offer) => GridStore.Same(bag, StackOf(offer));
+
+    /// <summary>Makes a bag stack with the slot, item, count and attributes of an offer, to compare it with the bag stack it was made from.</summary>
+    /// <param name="offer">The offer.</param>
+    /// <returns>The stack, not in any grid.</returns>
+    private static BagItem StackOf(StockItem offer) => new()
+    {
+        Slot = offer.BagCell,
+        ItemId = offer.ItemId,
+        Count = offer.Count,
+        Wear = offer.Wear,
+        Insert = offer.Insert,
+        Fusion = offer.Fusion,
+        Pose = offer.Pose,
+        BoxItem = offer.BoxItem,
+        Used = offer.Used,
+        Extra = offer.Extra,
+    };
+
     /// <summary>Hooks the house entry event so visitors are shown the offers.</summary>
     internal void Start()
     {
@@ -79,11 +124,6 @@ public sealed class HomeShopHandlers(
     private static byte[] DownPacket(int owner, Furniture f, StockItem s) =>
         new PacketWriter(Action62.Code, Action62.ShelfStop).I32(owner).U16(s.Id).U16(f.Index).ToArray();
 
-    /// <summary>Builds the packet <c>62/25</c> that refuses a request.</summary>
-    /// <param name="code">The refusal code.</param>
-    /// <returns>The packet.</returns>
-    private static byte[] Refuse(byte code) => new PacketWriter(Action62.Code, Action62.VendRefused).U8(code).ToArray();
-
     /// <summary>Handles <c>62/21</c> (shelf) and <c>62/24</c> (vending machine): the owner puts a bag stack up for sale at a unit price.</summary>
     /// <param name="session">The owner's session.</param>
     /// <param name="body">The furniture index, item id, bag slot, count and unit price, and for a vending machine the row.</param>
@@ -105,16 +145,20 @@ public sealed class HomeShopHandlers(
             || count == 0
             || count > stack.Count
             || price is < 1 or > MaxPrice
-            || items[itemId] is not { CellWidth: 1, CellHeight: 1 }
-            || piece.Stock.Exists(s => s.BagCell == bagSlot)
-            || c.Furniture.Any(f => f.Stock.Exists(s => s.BagCell == bagSlot)))
+            || items[itemId] is not { CellWidth: 1, CellHeight: 1 })
             return ValueTask.CompletedTask;
+        // a slot already listed on a shelf or machine, or held by a trade, a stall, the pet express or the ridden vehicle, stays as it is
+        if ((BagLocks.LockedBy(session, bagSlot) ?? SaleRefusal(items, session, stack)) is { } why)
+        {
+            logger.LogWarning("[{Session}] {Name}: offer bag slot {Slot} on {Furn}: {Why}", session.Id, c.Name, bagSlot, furn, why);
+            return ValueTask.CompletedTask;
+        }
         var pos = row is >= 1 and <= 5 && !piece.Stock.Exists(s => s.Pos == row) ? row
             : (byte)Enumerable.Range(1, positions).FirstOrDefault(p => !piece.Stock.Exists(s => s.Pos == p));
         var id = FreeId(c, vending);
         if (pos == 0 || id == 0)
         {
-            session.Send(Refuse(vending ? (byte)7 : (byte)1)); // code
+            session.Send(VendRefusal.Packet(vending ? VendRefusal.MachineFull : VendRefusal.AtLimit));
             return ValueTask.CompletedTask;
         }
         var offer = new StockItem
@@ -174,7 +218,11 @@ public sealed class HomeShopHandlers(
             s.Send(packet);
     }
 
-    /// <summary>Handles <c>62/23</c> (shelf) and <c>62/26</c> (vending machine): a visitor buys from an offer, paying the owner at once.</summary>
+    /// <summary>
+    /// Handles <c>62/23</c> (shelf) and <c>62/26</c> (vending machine): a visitor in the owner's house buys from an offer, paying the owner at once.
+    /// The buyer gets the owner's bag stack as it is; when it is no longer the stack the offer was made from (another item, other attributes or
+    /// fewer items), the offer is taken down instead. Everything after finding the owner runs under the owner's session gate.
+    /// </summary>
     /// <param name="session">The buyer's session.</param>
     /// <param name="body">The owner's login id, the offer id, the count, the item id and the unit price the buyer saw.</param>
     /// <param name="vending">True for a vending machine, false for a shelf.</param>
@@ -187,32 +235,75 @@ public sealed class HomeShopHandlers(
         var count = body.Span[6];
         var itemId = BinaryPrimitives.ReadUInt16LittleEndian(body.Span[7..]);
         var price = BinaryPrimitives.ReadInt32LittleEndian(body.Span[9..]);
-        if (tents.OwnerById(ownerId) is not { Session: { } ownerSession } owner || owner.Character.MapId != me.MapId || ownerId == session.Account.LoginId)
+        if (ownerId == session.Account.LoginId || tents.HouseOwnerFor(me, ownerId) is not { Session: { } ownerSession } owner
+            || owner.Character.MapId != me.MapId)
             return ValueTask.CompletedTask;
-        var oc = owner.Character;
+        if (!ownerSession.TryExclusiveFrom(session, out var held)) // the owner's own packet may be moving, selling or trading the listed stack
+        {
+            logger.LogWarning("[{Session}] {Name}: buy offer {Id} of {Owner} refused: the owner's session is busy", session.Id, me.Name, id, ownerId);
+            return ValueTask.CompletedTask;
+        }
+        using (held)
+        {
+            if (owner.Character.MapId == me.MapId) // the owner may have left the house before their gate was free
+                Buy(session, me, ownerSession, owner.Character, ownerId, id, count, itemId, price, vending);
+            else
+                logger.LogWarning("[{Session}] {Name}: buy offer {Id} of {Owner} refused: the owner left the house", session.Id, me.Name, id, ownerId);
+        }
+        return ValueTask.CompletedTask;
+    }
+
+    /// <summary>Carries out a purchase from a shelf or vending machine offer under the owner's session gate.</summary>
+    /// <param name="session">The buyer's session.</param>
+    /// <param name="me">The buyer's character.</param>
+    /// <param name="ownerSession">The owner's session, whose gate the caller holds.</param>
+    /// <param name="oc">The owner's character.</param>
+    /// <param name="ownerId">The owner's login id.</param>
+    /// <param name="id">The offer id.</param>
+    /// <param name="count">How many to buy.</param>
+    /// <param name="itemId">The item the buyer saw.</param>
+    /// <param name="price">The unit price the buyer saw.</param>
+    /// <param name="vending">True for a vending machine, false for a shelf.</param>
+    private void Buy(
+        GameSession session,
+        Character me,
+        GameSession ownerSession,
+        Character oc,
+        int ownerId,
+        ushort id,
+        byte count,
+        ushort itemId,
+        int price,
+        bool vending)
+    {
         var piece = oc.Furniture.Find(f => IsShop(f, vending) && f.Stock.Exists(s => s.Id == id));
         var offer = piece?.Stock.Find(s => s.Id == id);
         if (piece is null || offer is null || offer.ItemId != itemId || count == 0 || count > offer.Count)
-            return ValueTask.CompletedTask;
+            return;
         if (offer.Price != price)
         {
-            session.Send(Refuse(3)); // code
-            return ValueTask.CompletedTask;
+            session.Send(VendRefusal.Packet(VendRefusal.PriceChanged));
+            return;
         }
         var bag = oc.Bag.Find(b => b.Slot == offer.BagCell);
-        if (bag is null || bag.ItemId != offer.ItemId || bag.Count < count)
+        if (bag is null || !Matches(bag, offer) || bag.Count < count || SaleRefusal(items, ownerSession, bag) is not null)
         {
+            logger.LogWarning("[{Session}] {Name}: buy offer {Id} of {Owner}: the bag stack changed, the offer is taken down", session.Id, me.Name, id, oc.Name);
             TakeDown(ownerSession, oc, piece, offer);
-            return ValueTask.CompletedTask;
+            return;
         }
         var total = (long)price * count;
-        if (me.Gold < total || oc.Gold + total > int.MaxValue)
-            return ValueTask.CompletedTask;
-        var trial = Bag.Trial(me.Bag);
-        if (Bag.Add(trial, items, offer.ItemId, count, offer.Wear).Sum(x => x.Added) != count)
+        if (me.Gold < total || oc.Gold + total > BankHandlers.MaxGold)
         {
-            session.Send(Refuse(5)); // code
-            return ValueTask.CompletedTask;
+            logger.LogWarning("[{Session}] {Name}: buy offer {Id} of {Owner} for {Total}: not enough gold or the seller's purse is full", session.Id, me.Name,
+                id, oc.Name, total);
+            return;
+        }
+        var trial = Bag.Trial(me.Bag);
+        if (Bag.Add(trial, items, bag.ItemId, count, bag.Wear).Sum(x => x.Added) != count)
+        {
+            session.Send(VendRefusal.Packet(VendRefusal.Full));
+            return;
         }
         me.Gold -= (int)total;
         session.Send(PlayerMessages.MoneyChange(-(int)total));
@@ -222,7 +313,7 @@ public sealed class HomeShopHandlers(
         ownerSession.Send(ItemMessages.BagSlotDecrease(bag.Slot, count));
         if (bag.Count == 0)
             oc.Bag.Remove(bag);
-        Bag.SendAdded(session, Bag.Add(me, items, offer.ItemId, count, offer.Wear, offer.Insert, offer.Fusion, offer.Pose, offer.BoxItem, offer.Used, offer.Extra));
+        Bag.SendAdded(session, Bag.Add(me, items, bag.ItemId, count, bag.Wear, bag.Insert, bag.Fusion, bag.Pose, bag.BoxItem, bag.Used, bag.Extra));
         var sold = new PacketWriter(Action62.Code, Action62.ShelfSold).I32(ownerId).U16(offer.Id).U8(count).U16(piece.Index).ToArray();
         offer.Count -= count;
         if (offer.Count == 0)
@@ -237,7 +328,6 @@ public sealed class HomeShopHandlers(
             items[itemId]?.Name.Trim(),
             oc.Name,
             total);
-        return ValueTask.CompletedTask;
     }
 
     /// <summary>Shows the offers of the house's shelves and vending machines to the player who entered.</summary>

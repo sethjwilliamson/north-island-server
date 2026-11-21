@@ -60,7 +60,11 @@ public sealed class ForageHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Called every second: when the search is due, takes the wanted items from the ground into the bag and reports what was found.</summary>
+    /// <summary>
+    /// Called every second: when the search is due, takes the wanted items from the ground into the bag and reports what was found. An index
+    /// found holding the wanted item is taken only while it still holds that item, not another thing dropped into the freed index, and never
+    /// when another player dropped it as an item only they may pick up. Each stack keeps every attribute it had on the ground.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     public void Tick(GameSession session)
     {
@@ -68,15 +72,28 @@ public sealed class ForageHandlers(
             return;
         session.PetJobs.Forage = null;
         var found = 0;
+        var me = session.Account?.LoginId ?? 0;
         foreach (var index in ground.Find(c.MapId, job.ItemId).Take(options.Value.ItemUse.ForageMaxPerTrip))
         {
             if (Bag.FreeSlot(c, items, job.ItemId) == 0 && !c.Bag.Exists(b => b.ItemId == job.ItemId && b.Count < Bag.MaxStack))
                 break;
-            if (ground.Take(session, index) is not { } thing)
+            var thing = ground.TakeIf(
+                session,
+                index,
+                (t, _, _) => t.ItemId != job.ItemId || t.Gold != 0 ? "another thing lies there now"
+                    : t.Owner != 0 && t.Owner != me ? "only the player who dropped it may pick it up"
+                        : null,
+                out var refused);
+            if (thing is null)
+            {
+                if (refused is not null)
+                    logger.LogInformation("[{Session}] {Name}'s pet leaves ground index {Index}: {Why}", session.Id, c.Name, index, refused);
                 continue;
-            foreach (var (stack, added) in Bag.Add(c, items, thing.ItemId, Math.Max(1, thing.Count), thing.Wear))
-                session.Send(ItemMessages.BagAdd(new BagEntry { Slot = stack.Slot, ItemId = stack.ItemId, Count = added, Wear = stack.Wear }));
-            found += Math.Max(1, thing.Count);
+            }
+            var count = Math.Max(1, thing.Count);
+            var added = Bag.Add(c, items, thing.ItemId, count, thing.Wear, thing.Insert, thing.Fusion, thing.Pose, thing.BoxItem, thing.Used, thing.Extra);
+            Bag.SendAdded(session, added); // 23/8 names each slot with the stack's attributes
+            found += count;
         }
         session.Send(found > 0 ? ForageMessages.Found(job.ItemId, (byte)Math.Min(255, found)) : ForageMessages.End(job.BoneSlot, job.PetSlot, failed: true));
         logger.LogInformation("[{Session}] {Name}'s pet brings back {Count} of {Item}", session.Id, c.Name, found, job.ItemId);

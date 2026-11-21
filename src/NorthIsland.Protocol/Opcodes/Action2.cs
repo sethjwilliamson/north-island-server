@@ -26,4 +26,7 @@ public static class Action2
 
     /// <summary>Chat channel 7, which the server does not relay.</summary>
     public const byte Channel7 = 7;
+
+    /// <summary>Server to client: the player's chat is blocked; the client holds its local chat for 8 seconds.</summary>
+    public const byte ChatBlocked = 8;
 }

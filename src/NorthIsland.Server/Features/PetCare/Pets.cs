@@ -19,6 +19,19 @@ public static class Pets
                 : c.Pets.Exists(p => p.NpcId == npc.Id) || pending.Contains(npc.Id) ? "already has one"
                     : null;
 
+    /// <summary>Tells whether a character already has a pet of a kind: on the team, in the pet storage or asleep in a bed of the house.</summary>
+    /// <param name="c">The character.</param>
+    /// <param name="npcId">The NPC id of the kind.</param>
+    /// <returns>True when a pet of that kind is on the team, stored or asleep.</returns>
+    public static bool OwnsKind(Character c, ushort npcId) =>
+        c.Pets.Exists(p => p.NpcId == npcId) || c.StoredPets.Exists(p => p.NpcId == npcId) || SleepsInBed(c, npcId);
+
+    /// <summary>Tells whether a pet of a kind sleeps in one of the character's beds.</summary>
+    /// <param name="c">The character.</param>
+    /// <param name="npcId">The NPC id of the kind.</param>
+    /// <returns>True when a sleeping pet has that NPC id.</returns>
+    public static bool SleepsInBed(Character c, ushort npcId) => c.Furniture.Exists(f => f.Sleepers.Exists(s => s.Pet.NpcId == npcId));
+
     /// <summary>The item sub type of the Monster Net.</summary>
     public const byte MonsterNetSubType = 140;
 
@@ -133,22 +146,42 @@ public static class Pets
         WorldState world,
         CombatStats combat)
     {
+        if (Remove(session, character, pet, world))
+            combat.Send(session);
+    }
+
+    /// <summary>
+    /// Removes a pet from the team as <see cref="Exile"/> does, but leaves resending the combat stats to the caller: rests and hides it when it is
+    /// the active pet, gets the owner off it when it is ridden, removes it from the list and tells the client.
+    /// </summary>
+    /// <param name="session">The owner's session.</param>
+    /// <param name="character">The owner's character.</param>
+    /// <param name="pet">The pet to remove.</param>
+    /// <param name="world">The world state, for the map broadcast.</param>
+    /// <returns>True when the owner got off the pet, so their combat stats changed.</returns>
+    public static bool Remove(
+        GameSession session,
+        Character character,
+        Pet pet,
+        WorldState world)
+    {
         if (character.ActivePetId == pet.NpcId)
         {
             character.ActivePetId = 0;
             session.Send(PetMessages.Rest());
             world.HidePet(session);
         }
-        if (session.RidingPetSlot == pet.Slot)
+        var dismounted = session.RidingPetSlot == pet.Slot;
+        if (dismounted)
         {
             session.RidingPetSlot = 0;
             var off = PetMessages.Dismounted(session.Account!.LoginId);
             session.Send(off);
             world.Broadcast(session, off, sameMapOnly: true);
-            combat.Send(session);
         }
         character.Pets.Remove(pet);
         session.Send(PetMessages.Removed(session.Account!.LoginId, pet.Slot));
+        return dismounted;
     }
 
     /// <summary>Finds the first free team slot.</summary>

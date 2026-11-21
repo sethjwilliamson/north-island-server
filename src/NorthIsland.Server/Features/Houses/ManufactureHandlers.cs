@@ -100,6 +100,14 @@ public sealed class ManufactureHandlers(
         else
             (smallTaken, canTaken) = (0, 0);
         var takeBag = new List<(BagItem Stack, byte Count)>();
+        var lockedPart = bagParts.Select(p => (p.Slot, Why: BagLocks.LockedBy(session, p.Slot))).FirstOrDefault(p => p.Why is not null);
+        if (lockedPart.Why is { } locked)
+        {
+            logger.LogWarning("[{Session}] {Name}: manufacture {Product}: bag slot {Slot} is {Why}", session.Id, character.Name,
+                NameOf(recipe.Product), lockedPart.Slot, locked);
+            RefusePetOrder(session, petSlot);
+            return ValueTask.CompletedTask;
+        }
         foreach (var (slot, count) in bagParts)
         {
             var stack = character.Bag.Find(b => b.Slot == slot);
@@ -112,10 +120,11 @@ public sealed class ManufactureHandlers(
             takeBag.Add((stack, take));
             need[stack.ItemId] = left - take;
         }
+        // The station itself may be a material: the Wit Maid is made at a Maid Robot and uses that robot up.
         var takeFurn = new List<Furniture>();
         foreach (var index in furnParts.Distinct())
         {
-            var piece = character.Furniture.Find(f => f.Index == index && f.Index != furnIndex && f.Parent == 0);
+            var piece = character.Furniture.Find(f => f.Index == index && f.Parent == 0);
             if (piece is null || !need.TryGetValue(piece.ItemId, out var left) || left == 0 || character.Furniture.Exists(f => f.Parent == index))
                 continue;
             takeFurn.Add(piece);
@@ -181,6 +190,11 @@ public sealed class ManufactureHandlers(
         Schedule(session, job);
         return ValueTask.CompletedTask;
     }
+
+    /// <summary>Returns whether the item is a Magic Sandglass, whose uses are counted on the placed piece.</summary>
+    /// <param name="itemId">The item id of a furniture piece.</param>
+    /// <returns>True for both Magic Sandglass items.</returns>
+    public static bool IsSandglass(ushort itemId) => itemId is 39074 or 39097; // 39074 Magic Sandglass, 39097 Magic Sandglass
 
     /// <summary>Returns the percent by which the placed furniture shortens manufacture times; each kind of furniture counts once.</summary>
     /// <param name="furniture">The item ids of the furniture placed in the house.</param>
@@ -270,7 +284,7 @@ public sealed class ManufactureHandlers(
     {
         if (InOwnHouse(session) is not { } character || body.Length < 2)
             return ValueTask.CompletedTask;
-        var piece = character.Furniture.Find(f => f.Index == body.Span[1] && f.ItemId is 39074 or 39097); // 39074 Magic Sandglass, 39097 Magic Sandglass
+        var piece = character.Furniture.Find(f => f.Index == body.Span[1] && IsSandglass(f.ItemId));
         if (piece is null || character.SandglassArmed || piece.Uses >= options.Value.HouseLife.SandglassUses)
         {
             logger.LogInformation(
@@ -308,6 +322,11 @@ public sealed class ManufactureHandlers(
         var running = character.MakeJobs.Where(j => j.StartedUtc is not null).ToList();
         if (mantle is null || running.Count == 0)
             return ValueTask.CompletedTask;
+        if (BagLocks.LockedBy(session, mantle.Slot) is { } locked)
+        {
+            logger.LogWarning("[{Session}] {Name}: Time Mantle in bag slot {Slot} is {Why}", session.Id, character.Name, mantle.Slot, locked);
+            return ValueTask.CompletedTask;
+        }
         mantle.Count--;
         if (mantle.Count == 0)
             character.Bag.Remove(mantle);
@@ -329,8 +348,9 @@ public sealed class ManufactureHandlers(
     }
 
     /// <summary>
-    /// Handles <c>64/2</c>, which continues the job in a slot: a job that has not started yet is started (with the pet the packet names, if any),
-    /// and its delivery is scheduled. A slot without a job is logged and answered with the pet-left packet.
+    /// Handles <c>64/2</c>, which continues the job in a slot: a paused job is started (with the pet the packet names, if any) and its delivery is
+    /// scheduled. A job that is already running has its delivery scheduled already and is left as it is, so repeated requests cannot stack
+    /// delivery timers. A slot without a job is logged and answered with the pet-left packet.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body after the action and sub code.</param>
@@ -348,20 +368,22 @@ public sealed class ManufactureHandlers(
         if (r.Remaining >= 2)
             r.Bytes(2);
         var (petSlot, petId) = ReadPet(ref r);
-        if (job.StartedUtc is null)
+        if (job.StartedUtc is not null)
         {
-            if (petSlot != 0 && PetRefusal(session, character, petSlot, petId) is { } why)
-            {
-                logger.LogWarning("[{Session}] {Name}: continue manufacture with pet {Pet}: {Why}", session.Id, character.Name, petId, why);
-                session.Send(HouseMessages.PetLeft());
-                return ValueTask.CompletedTask;
-            }
-            (job.PetSlot, job.PetId) = (petSlot, petSlot != 0 ? petId : 0);
-            job.StartedUtc = GameClock.UtcNow;
-            session.Send(HouseMessages.MakeJobs([RecordOf(job, GameClock.UtcNow)]));
-            session.Send(HouseMessages.MakeState(Action64.Start, job.Slot));
-            SendPetMaker(session, job);
+            logger.LogInformation("[{Session}] {Name}: continue manufacture: the job in slot {Slot} is already running", session.Id, character.Name, job.Slot);
+            return ValueTask.CompletedTask;
         }
+        if (petSlot != 0 && PetRefusal(session, character, petSlot, petId) is { } why)
+        {
+            logger.LogWarning("[{Session}] {Name}: continue manufacture with pet {Pet}: {Why}", session.Id, character.Name, petId, why);
+            session.Send(HouseMessages.PetLeft());
+            return ValueTask.CompletedTask;
+        }
+        (job.PetSlot, job.PetId) = (petSlot, petSlot != 0 ? petId : 0);
+        job.StartedUtc = GameClock.UtcNow;
+        session.Send(HouseMessages.MakeJobs([RecordOf(job, GameClock.UtcNow)]));
+        session.Send(HouseMessages.MakeState(Action64.Start, job.Slot));
+        SendPetMaker(session, job);
         Schedule(session, job);
         return ValueTask.CompletedTask;
     }
@@ -404,7 +426,7 @@ public sealed class ManufactureHandlers(
         if (owner != session || session.ActiveCharacter is not { } character)
             return;
         var now = GameClock.UtcNow;
-        foreach (var piece in character.Furniture.Where(f => f.ItemId is 39074 or 39097 && f.Uses > 0)) // 39074 Magic Sandglass, 39097 Magic Sandglass
+        foreach (var piece in character.Furniture.Where(f => IsSandglass(f.ItemId) && f.Uses > 0))
             session.Send(HouseLifeMessages.SandglassUsed((byte)piece.Index, SandglassValue(piece)));
         if (SandglassFlags(character) != 0)
             SendSandglassFlags(session, character);
@@ -451,14 +473,20 @@ public sealed class ManufactureHandlers(
     }
 
     /// <summary>
-    /// Finishes a job: puts the products into the bag and removes the job. When the bag cannot hold them the job stays, fully elapsed and paused,
-    /// and the client is told the bag is full.
+    /// Finishes a job: removes the job first, so it is claimed once, then puts the products into the bag. A job that is no longer listed (delivered
+    /// already) is logged and skipped. When the bag cannot hold the products the job stays, fully elapsed and paused, and the client is told the
+    /// bag is full.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="job">The job to deliver.</param>
     private void Deliver(GameSession session, MakeJob job)
     {
         var character = session.ActiveCharacter!;
+        if (!character.MakeJobs.Contains(job))
+        {
+            logger.LogWarning("[{Session}] {Name}: {Product} in slot {Slot} was delivered already", session.Id, character.Name, NameOf(job.Product), job.Slot);
+            return;
+        }
         if (job.PetId != 0 && !character.Pets.Exists(p => p.NpcId == job.PetId))
         {
             (job.PetSlot, job.PetId) = (0, 0);
@@ -478,9 +506,9 @@ public sealed class ManufactureHandlers(
             logger.LogInformation("[{Session}] {Name}: {Product} x{Count} made, but the bag is full", session.Id, character.Name, NameOf(job.Product), count);
             return;
         }
+        character.MakeJobs.Remove(job);
         foreach (var (stack, added) in Bag.Add(character, items, job.Product, count))
             session.Send(ItemMessages.BagAdd(new BagEntry { Slot = stack.Slot, ItemId = stack.ItemId, Count = added, Wear = stack.Wear }));
-        character.MakeJobs.Remove(job);
         session.Send(HouseMessages.MakeState(Action64.Finish, job.Slot));
         if (job.Sandglass)
             SendSandglassFlags(session, character);
@@ -503,13 +531,16 @@ public sealed class ManufactureHandlers(
         job.StartedUtc = null;
     }
 
-    /// <summary>Returns whether the item is a Maid Robot or a Wit Maid; with one placed in the house, a pet can make things.</summary>
+    /// <summary>
+    /// Returns whether the item is a Maid Robot or a Wit Maid in any costume (<see cref="MaidHandlers.MaidFurniture"/>, which Item.dat lists as
+    /// 39096, 39117 to 39119, 39223, 39224 and 39243); with one placed in the house, a pet can make things.
+    /// </summary>
     /// <param name="itemId">The item id of a furniture piece.</param>
     /// <returns>True when it is a maid piece.</returns>
-    public static bool IsMaid(ushort itemId) =>
-        itemId is 39066 // Maid Robot
-            or 39096 // Wit Maid
-            or >= 39117 and <= 39119; // 39117 Wit Maid-Summer, 39119 Wit Maid-Cat
+    public static bool IsMaid(ushort itemId) => itemId == MaidRobot || MaidHandlers.MaidFurniture.Contains(itemId);
+
+    /// <summary>The item id of the Maid Robot, a maid piece that wears no costume.</summary>
+    public const ushort MaidRobot = 39066; // Maid Robot
 
     /// <summary>Reads the optional pet at the end of an order: a slot (u8) and a pet id (i32).</summary>
     /// <param name="r">The reader, positioned after the rest of the order.</param>

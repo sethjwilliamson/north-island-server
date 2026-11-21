@@ -6,15 +6,17 @@ namespace NorthIsland.Server.Features.Travel;
 /// <summary>Serves the Teleport Scroll and the Dragonflies, which teleport the player to one of the magic map places.</summary>
 /// <param name="items">The item records.</param>
 /// <param name="world">The online sessions and maps.</param>
+/// <param name="travel">The teleport rule.</param>
 /// <param name="logger">The logger.</param>
 public sealed class TeleportHandlers(
     ItemData items,
     WorldState world,
+    TravelRules travel,
     ILogger<TeleportHandlers> logger)
 {
     /// <summary>
-    /// Teleports the player to a place (<c>23/89</c>), using up a charge of the item. Refused (the bag slot is released) in a battle, at a stall, in
-    /// an event or game, in a team, in a house, on the same map or on a map without magic travel.
+    /// Teleports the player to a place (<c>23/89</c>), using up a charge of the item. Refused (the bag slot is released) by the teleport rule
+    /// (busy states, a map that cannot be left or reached), in a team and on the same map.
     /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: u8 place, u8 bag slot, u8 mode (1 scroll, 2 dragonfly).</param>
@@ -28,15 +30,11 @@ public sealed class TeleportHandlers(
         var id = session.Account!.LoginId;
         var valid = stack is not null && target is not null
             && (mode == 1 && stack.ItemId == MagicMap.TeleportScroll || mode == 2 && MagicMap.Dragonflies.Contains(stack.ItemId));
-        string? refusal = !valid ? "no such item or place"
-            : session.Battle is not null ? "in a battle"
-                : session.Stalls.Any ? "at a stall"
-                    : session.Event is not null || session.Minigame is not null ? "in an event or a game"
-                        : world.Teams.LeaderOf(id) != 0 ? "in a team"
-                            : TentHandlers.IsHouseMap(c.MapId) ? "in a house"
-                                : MagicMap.NoTeleportMaps.Contains(c.MapId) ? "on a map that cannot be left this way"
-                                    : target!.Map == c.MapId ? "on the same map"
-                                        : null;
+        var refusal = !valid ? "no such item or place"
+            : travel.TeleportRefusal(session, c, target!.Map)
+                ?? (world.Teams.LeaderOf(id) != 0 ? "in a team"
+                    : target.Map == c.MapId ? "on the same map"
+                        : null);
         if (refusal is not null)
         {
             logger.LogInformation(

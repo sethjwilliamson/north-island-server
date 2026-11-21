@@ -14,7 +14,11 @@ public sealed class ShopHandlers(
     ItemData items,
     ILogger<ShopHandlers> logger)
 {
-    /// <summary>Handles a sell request (<c>27/2</c>): removes the listed bag stacks and pays their sell price, or answers with a failure.</summary>
+    /// <summary>
+    /// Handles a sell request (<c>27/2</c>): removes the listed bag stacks and pays their sell price, or answers with a failure. Needs the sell
+    /// window of the sale kind open (<see cref="OpenServices"/>), stacks of that kind not committed elsewhere (<see cref="BagLocks"/>), and room
+    /// in the purse for the whole price.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="body">The packet body: the sale kind and the bag slots to sell.</param>
     internal ValueTask OnSell(GameSession session, ReadOnlyMemory<byte> body)
@@ -22,16 +26,35 @@ public sealed class ShopHandlers(
         var character = session.ActiveCharacter;
         if (session.State != SessionState.InWorld || character is null)
             return ValueTask.CompletedTask;
-
         var request = SellRequest.Parse(body.Span);
+        var window = request.SaleKind == 0 ? ServiceWindow.SellEquipment : ServiceWindow.SellGoods; // sale kind 0: equipment, else goods
+        if (!OpenServices.IsOpen(session, character, window))
+        {
+            logger.LogWarning(
+                "[{Session}] sell without an open {Window} window (map {Map}, window map {WindowMap}, in battle {Battle})",
+                session.Id,
+                window,
+                character.MapId,
+                OpenServices.MapOf(session, window),
+                session.Battle is not null);
+            session.Send(ShopMessages.SellResult(SellResult.Failed));
+            return ValueTask.CompletedTask;
+        }
+
         var stacks = new List<BagItem>();
         foreach (var slot in request.Slots.Distinct())
         {
             var stack = character.Bag.Find(b => b.Slot == slot);
             var record = stack is null ? null : items[stack.ItemId];
-            if (stack is null || record is null || record.IsEquipment != (request.SaleKind == 0) || session.Vehicle?.BagSlot == slot)
+            var locked = BagLocks.LockedBy(session, slot);
+            if (stack is null || record is null || record.IsEquipment != (request.SaleKind == 0) || locked is not null)
             {
-                logger.LogWarning("[{Session}] sell: bag slot {Slot} cannot be sold here (kind {Kind})", session.Id, slot, request.SaleKind);
+                logger.LogWarning(
+                    "[{Session}] sell: bag slot {Slot} cannot be sold here (kind {Kind}, {Locked})",
+                    session.Id,
+                    slot,
+                    request.SaleKind,
+                    locked ?? "empty or of the other kind");
                 session.Send(ShopMessages.SellResult(SellResult.NotInInventory));
                 return ValueTask.CompletedTask;
             }
@@ -43,16 +66,26 @@ public sealed class ShopHandlers(
             return ValueTask.CompletedTask;
         }
 
-        var total = stacks.Sum(s => (long)s.Count * items[s.ItemId]!.SellPrice);
+        var total = stacks.Sum(s => (long)s.Count * Math.Max(0, items[s.ItemId]!.SellPrice));
+        if (character.Gold + total > BankHandlers.MaxGold)
+        {
+            logger.LogInformation(
+                "[{Session}] {Name}: sale for {Total} gold does not fit the purse ({Gold})",
+                session.Id,
+                character.Name,
+                total,
+                character.Gold);
+            session.Send(PlayerMessages.MoneyBagFull());
+            session.Send(ShopMessages.SellResult(SellResult.Failed));
+            return ValueTask.CompletedTask;
+        }
         var sold = string.Join(", ", stacks.Select(s => $"{items[s.ItemId]!.Name} x{s.Count}"));
         foreach (var stack in stacks)
         {
             session.Send(ItemMessages.BagSlotDecrease(stack.Slot, stack.Count));
             character.Bag.Remove(stack);
         }
-        character.Gold = (int)Math.Min(int.MaxValue, character.Gold + total);
-        if (total > 0)
-            session.Send(PlayerMessages.MoneyChange((int)total));
+        Purse.Credit(session, character, total);
         session.Send(ShopMessages.SellResult(SellResult.Ok));
         logger.LogInformation("[{Session}] {Name} sells {Items} for {Total} gold ({Gold} now)", session.Id, character.Name, sold, total, character.Gold);
         return ValueTask.CompletedTask;
@@ -72,7 +105,10 @@ public sealed class ShopHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Buys the cart: checks the open store, rows, gold and bag room, then charges and fills the bag, all or nothing.</summary>
+    /// <summary>
+    /// Buys the cart: checks the open store, rows, gold and bag room, then charges and fills the bag, all or nothing. A row whose item has no
+    /// price is refused, since it could be sold back for gold.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="character">The player's character.</param>
     /// <param name="request">The parsed cart.</param>
@@ -93,6 +129,11 @@ public sealed class ShopHandlers(
             if (row < 1 || row > rows.Count || count == 0 || items[rows[row - 1]] is not { } item)
             {
                 logger.LogWarning("[{Session}] buy: store {Store} has no row {Row}", session.Id, store.Index, row);
+                return BuyResult.Failed;
+            }
+            if (item.Price <= 0)
+            {
+                logger.LogWarning("[{Session}] buy: row {Row} of store {Store} ({Item}) has no price", session.Id, row, store.Index, item.Name);
                 return BuyResult.Failed;
             }
             lines.Add((item.Id, count, item.Price));
@@ -132,15 +173,23 @@ public sealed class ShopHandlers(
         return BuyResult.Ok;
     }
 
-    /// <summary>Finds the store the player has open.</summary>
+    /// <summary>
+    /// Finds the store the player has open: the store dialog an NPC event last showed (<see cref="OpenServices"/>), looked up by its interact
+    /// index on the map it was shown on, which must be the player's current map, out of battle.
+    /// </summary>
     /// <param name="session">The player's session.</param>
     /// <param name="character">The player's character.</param>
-    /// <returns>The store interaction of the player's current map, or null when none is open.</returns>
+    /// <returns>The store interaction, or null when none is open.</returns>
     private EveInteract? OpenStore(GameSession session, Character character)
     {
-        if (session.Event?.OpenInteract is not { } index)
+        if (OpenServices.Of(session, character, ServiceWindow.Store) is not { } open)
             return null;
-        var interact = maps.Scene(character.MapId)?.Interacts.FirstOrDefault(i => i.Index == index);
-        return interact is { Kind: 2 or 3 } ? interact : null;
+        var interact = maps.Scene(open.MapId)?.Interacts.FirstOrDefault(i => i.Index == open.Interact);
+        return IsStore(interact) ? interact : null;
     }
+
+    /// <summary>Whether an interaction of a map is a store dialog: an equipment store (kind 2) or a goods store (kind 3).</summary>
+    /// <param name="interact">The interaction, or null.</param>
+    /// <returns>True for a store.</returns>
+    public static bool IsStore(EveInteract? interact) => interact is { Kind: 2 or 3 }; // 2 equipment store, 3 goods store
 }
