@@ -178,7 +178,8 @@ public sealed partial class BattleHandlers
 
     /// <summary>
     /// Takes one player and their pet out of the battle and settles what the battle cost or gave them, once per player: a later call for the
-    /// same player does nothing. The battle sees them gone at once; the changes to the player (their exit, the losses, HP, SP and wear, the
+    /// same player does nothing. Who leaves a fight that goes on against a monster with a respawn for each player sees it gone until the end.
+    /// The battle sees them gone at once; the changes to the player (their exit, the losses, HP, SP and wear, the
     /// caught pets) run under the player's gate (<see cref="GameSession.HandOver"/>), as this may run under another player's gate or none.
     /// </summary>
     /// <param name="logSession">The session used for logging.</param>
@@ -200,6 +201,8 @@ public sealed partial class BattleHandlers
             if (player.Settled)
                 return;
             player.Settled = true;
+            if (battle.Phase != BattlePhase.Over && HasPersonalRespawn(battle))
+                world.HideMonster(battle.MapId, battle.SourceRole, BattleHideSeconds, player: player.Id);
         }
         var pet = battle.PetOf(player);
         var session = player.Session;

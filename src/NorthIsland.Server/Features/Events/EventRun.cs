@@ -118,6 +118,9 @@ public sealed class EventRun(
     /// <summary>How the last battle of the run ended; null while none has.</summary>
     public BattleOutcome? BattleOutcome { get; set; }
 
+    /// <summary>The team members the run's battles took in, who may fight the next one of the run too.</summary>
+    public HashSet<int> Fighters { get; } = [];
+
     /// <summary>
     /// The event of the group the run took last. A fight's outcome belongs to the event that fought it: every event whose groups test
     /// the outcome starts its own fight, so the outcome is cleared when the run moves on to the groups of another event.

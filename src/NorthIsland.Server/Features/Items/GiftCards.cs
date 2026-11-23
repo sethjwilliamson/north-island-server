@@ -9,9 +9,10 @@ public static class GiftCards
     /// <summary>
     /// The version number sent with every card list. The client keeps the lists it was sent and asks again only when this differs, so raise it
     /// whenever a card's choices change (2: the Bronze, Silver, Golden and Free Cards became the event tier choice cards; 3: the Escape Button
-    /// and the bottle potions joined the Bronze Card; 4: Alchemy Book 1 joined it).
+    /// and the bottle potions joined the Bronze Card; 4: Alchemy Book 1 joined it;
+    /// 5: the travel items left the cards).
     /// </summary>
-    public const byte Flag = 4;
+    public const byte Flag = 5;
 
     /// <summary>Reads the embedded gift card table.</summary>
     /// <returns>The cards by card item id; empty when the table is missing.</returns>

@@ -148,6 +148,15 @@ public static class StatusRules
             : current.Effect != effect; // the same debuff refreshes, another of its kind misses
     }
 
+    /// <summary>
+    /// Whether a status put on an enemy has to beat the target's resistance to land: the controls (freeze, sleep, stone, mess and the
+    /// like) and Seal. Every other debuff (Shrink, Cuss, Slowdown, Defence Down, poison) lands whenever its slot lets it.
+    /// </summary>
+    /// <param name="effect">The Skill.dat effect byte.</param>
+    /// <param name="attr">The slot attribute the status goes into.</param>
+    /// <returns>True for the control slot and for Seal.</returns>
+    public static bool IsResisted(byte effect, byte attr) => attr == Control || effect == Seal;
+
     /// <summary>Whether the client takes a removed status off by itself when it plays the remover skill, so no removal needs to be sent.</summary>
     /// <param name="status">The removed status.</param>
     /// <returns>False for the slots and effects the client does not cure on its own.</returns>

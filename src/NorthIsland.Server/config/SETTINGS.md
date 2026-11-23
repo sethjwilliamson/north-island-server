@@ -75,6 +75,7 @@ Environment variables such as `Server__GmAccounts` override them all.
 | `ComboRebornLevelBonus` | The levels a fighter counts per rebirth on top of its level for the combination odds |
 | `ComboDamageBonusPercent` | The percent added to the damage of every member of a combination; 0 is the plain sum |
 | `DefeatedMonsterHideSeconds` | How many seconds a monster that was beaten stays hidden on the map |
+| `PersonalRoamingMonsters` | True to give each player their own respawn of a roaming monster: fighting it hides it only from the players in that fight, and a team member waiting for it to come back stays out of the team's fight against it; anyone may still join a fight against it with the join cursor. Stationary monsters, instances and monsters that count toward an instance goal always share one respawn. False (default) shares every respawn |
 | `BattleImmunitySeconds` | How many seconds after a battle a player cannot be drawn into a new fight |
 | `MonsterGoldRewards` | True when winning a battle also pays gold |
 | `GoldPerLevelMin` | The lowest gold a monster pays per level; the roll starts at level × this (0.1 gives a level 100 monster at least 10) |
@@ -90,6 +91,10 @@ Environment variables such as `Server__GmAccounts` override them all.
 | `BurstDebuffBasePercent` | The percent of the combination damage paid as burst experience to a fighter who cast no debuff or buff |
 | `BurstDebuffStepPercent` | The percent added to that for each distinct debuff the fighter cast on a monster (hit or missed; counted for that monster's combination damage) and each distinct buff it put on an ally who did damage (once a battle, for every monster) |
 | `DebuffStacking` | Which control and debuff statuses an enemy can carry at once. PerKind: one of each kind (control, with mess counted as one; Shrink or Cuss; Slowdown, Defence Down or Seal; poison), where a status of a kind already on misses, except that a control replaces a sleep and the same debuff cast again lasts longer. OnePerEnemy: any control or debuff misses while the enemy carries one |
+| `StatusChanceBasePercent` | The chance in percent that a control (freeze, sleep, stone, mess and the like) or Seal lands on an enemy whose Wisdom equals the caster's Intelligence. Other debuffs (Shrink, Cuss, Slowdown, Defence Down, poison) do not roll and land whenever `DebuffStacking` lets them; statuses on your own side always land |
+| `StatusChanceSpreadPercent` | How far the caster's Intelligence against the target's Wisdom moves that chance: base + spread * (INT - WIS) / (INT + WIS). With 50 and 60, equal stats give 50%, double the Wisdom 30%, triple 20%, double the Intelligence 70% |
+| `StatusChanceMinPercent` | The lowest chance in percent that a control or Seal lands |
+| `StatusChanceMaxPercent` | The highest chance in percent that a control or Seal lands |
 | `CussDamagePercent` | The percent more damage a target under Cuss takes |
 | `ShrinkDamagePercent` | The percent more damage a target under Shrink takes |
 | `FreezeDamagePercent` | The percent more damage a frozen target takes |
@@ -153,7 +158,7 @@ Each row: Item = the item id that drops; MinLevel = the lowest monster level the
 | `ExpPerExtraAction` | The share added to the experience for each action after the first on a monster |
 | `LevelGapFullUpTo` | The level lead over a monster up to which its experience is paid in full |
 | `LevelGapZeroFrom` | The level lead over a monster from which no experience is paid |
-| `TrainingIslandFlatExp` | The experience a win on the Training Island adds on top of the normal amount, for a player and a pet; events and potions do not raise it. Only while a Training Voucher, Ticket or Fare is running: without one, an island win gives no experience at all and no per-round heal (drops still come) |
+| `TrainingIslandFlatExp` | The experience a win on the Training Island adds on top of the normal amount, for a player and a pet; events and potions do not raise it. Only while a Training Voucher, Ticket or Fare is running: without one, a player meets no random fights on the island or its areas unless a teammate there is in training, and a win gives them no experience at all and no per-round heal (drops still come) |
 | `PetDefeatAmityLoss` | The amity a pet loses when it falls in a battle |
 | `PetDefeatExpLossPercent` | The percent of the current level's exp a pet loses when it falls; 0 means it loses amity only |
 | `PetAmityPerLevel` | The amity a pet gains for each level it gains |
@@ -498,16 +503,71 @@ pet voucher or the 7 Colors Egg; the one random-pet prize is the Pet Egg (Spring
 whose pet starts at level 1 like every new pet. Each event's monsters drop its common bag (1.67% per monster) and, rarely,
 its big bag (0.0125%). The rates are set for a fast grinder at 20 kills a minute (1,200 kills an hour): about 20 common
 bags an hour and one big bag every 4 hours, counting the big bags found inside common bags (0.1 an hour from those and
-0.15 dropped). That works out to about one jackpot every 10 hours and one top prize every 100 hours, before choice cards.
+0.15 dropped). That works out to about one jackpot every 10 hours and one top prize every 150 hours, before choice cards.
 The bags are the client's own lucky bags (item type 41,
 which show their contents when previewed), except the Anniversary boxes, and their rows are in `Data/LuckyBags.tsv` and
-`Data/BoxGuesses.tsv` (or override them with `MallBoxes:LuckyBagsFile`). All bags follow one pattern (common bag weights
-out of 10,000, big bag weights out of 1,000):
+`Data/BoxGuesses.tsv` (or override them with `MallBoxes:LuckyBagsFile`). Every bag has a few themed rows and the same
+fixed rows; the forging scrolls come more often and in bigger stacks the lower their success rate (common bag weights out
+of 10,000, big bag weights out of 1,000):
 
 | Bag | Rows |
 |---|---|
-| Common | 4 foods, Wishing Coins or Bamboo Dragonflies (1060 each, 42.4%); 6 uncommons such as fireworks, scrolls, amity jellies, Delay Clocks, Alchemy Books 1 and 2 (550 each, 33%); 5 rares such as the suit boxes, ears boxes, the mall's own boxes, Gold Amity Jelly, Pet Lethe Scrolls, door vouchers, GPS, spars, Alchemy Books 3 and 4 (300 each, 15%); the event's big bag (50, 0.5%); one jackpot (15, 0.15%); a Bronze Card (590, 5.9%), a Silver Card (300, 3%) and a Golden Card (5, 0.05%) |
-| Big | 7 themed rares (95 each, 66.5%) and a Silver Card (35, 3.5%); 4 themed jackpots such as wings and robe boxes, saddles, Water Pack (Holy EXP potions), Transfer Mirror, Maid Box, Yacht, Bomb Diamonds, Potential Pill (60 each, 24%) and a Golden Card (20, 2%); 2 top prizes: the mall weapon boxes, Friendship Brooch, Fairy's Spar (17 each, 3.4%) and a Free Card (6, 0.6%) |
+| Common, themed | a high-HP food ×5 and a high-SP food ×5 (1150 each, 11.5%) and Pizza ×2 (1000, 10%); 4 uncommons such as fireworks, scrolls, amity jellies, Delay Clocks (450 each, 18%); 3 rares such as the suit boxes, ears boxes, the mall's own boxes, Gold Amity Jelly, door vouchers, spars (150 each, 4.5%); one jackpot (15, 0.15%); the event's big bag (50, 0.5%) |
+| Common, fixed | Carnie Token ×3 (1000, 10%); Alchemy Book 1 (600, 6%), 2 (500, 5%), 3 (400, 4%) and 4 (300, 3%); the event's common forging scroll ×3 (400, 4%) and uncommon forging scroll ×2, Small Demon ×1 (250, 2.5%); the event's uncommon diamond (150, 1.5%); Strong Scroll and Pet Lethe Scroll (150 each, 1.5%); the event's rare forging scroll (100, 1%); the event's rare diamond (80, 0.8%); Seraph Scroll and the event's jackpot diamond (15 each, 0.15%); a Bronze Card (195, 1.95%), a Silver Card (75, 0.75%) and a Golden Card (5, 0.05%) |
+| Big, themed | 4 rares (115 each, 46%); 3 jackpots such as wings and robe boxes, saddles, Water Pack (Holy EXP potions), Transfer Mirror, Maid Box, Bomb Diamonds, Potential Pill (50 each, 15%); 2 top prizes: the mall weapon boxes, Friendship Brooch, Fairy's Spar, Yacht Voucher (12 each, 2.4%) |
+| Big, fixed | Strong Scroll ×3 and Pet Lethe Scroll ×2 (70 each, 7%); the event's rare forging scroll ×2 (60, 6%) and Seraph Scroll ×2 (30, 3%); the event's rare diamond (50, 5%), jackpot diamond (15, 1.5%) and top-prize diamond (3, 0.3%); a Silver Card (45, 4.5%), a Golden Card (20, 2%) and a Free Card (3, 0.3%) |
+
+At 20 kills a minute that is about 1.2 Alchemy Book 1s, 1 Book 2, 0.8 Book 3s and 0.6 Book 4s an hour, a
+Strong Scroll or a Pet Lethe Scroll every 3 hours, a Seraph Scroll every 22 hours and the event's uncommon diamond every 3
+hours. Each event has one diamond of each rarity, and the events take turns through each rarity's range:
+
+| Rarity | Diamonds | Events |
+|---|---|---|
+| Uncommon (common bag) | Black +20, Shining +22, Nimbus +24 | Black: Winter Festival, Lantern Festival, Anniversary, Artisan Festival, Thanksgiving; Shining: Chinese New Year, White Day, Dragon Boat Festival, Mid-Autumn Festival, Christmas; Nimbus: Valentine's Day, Spring Festival, Summer, Halloween, New Year |
+| Rare (both bags) | Pink +26, Golden +28, Orange +30, Grass +32 | Pink: Winter Festival, White Day, Summer, Thanksgiving; Golden: Chinese New Year, Spring Festival, Artisan Festival, Christmas; Orange: Valentine's Day, Anniversary, Mid-Autumn Festival, New Year; Grass: Lantern Festival, Dragon Boat Festival, Halloween |
+| Jackpot (both bags) | Sanguine +34, Blove +36, Sky +38, Death +40 | Sanguine: Winter Festival, White Day, Summer, Thanksgiving; Blove: Chinese New Year, Spring Festival, Artisan Festival, Christmas; Sky: Valentine's Day, Anniversary, Mid-Autumn Festival, New Year; Death: Lantern Festival, Dragon Boat Festival, Halloween |
+| Top prize (big bag) | Fairy +42, Purple +44, Star +46 | Fairy: Winter Festival, Lantern Festival, Anniversary, Artisan Festival, Thanksgiving; Purple: Chinese New Year, White Day, Dragon Boat Festival, Mid-Autumn Festival, Christmas; Star: Valentine's Day, Spring Festival, Summer, Halloween, New Year |
+
+Every common bag's foods are a high-HP food (HP 800 or more, higher than its SP), a high-SP food (SP 600 or more,
+higher than its HP) and Pizza (Hawaii Pizza for Summer, Anniversary and Artisan Festival), which restores both; the
+Wishing Coin isn't a prize (its Holy Village pool gifts include Boarded Vouchers and the VIP Card). An event
+uses its own food when it has one that fits, and otherwise the events take turns through the strongest foods:
+
+| Event | High-HP food | High-SP food |
+|---|---|---|
+| Winter Festival | QQ Noodles (HP 1500) | Koryo Insam (SP 1200) |
+| Chinese New Year | Nian Congee (HP 800, SP 500) | Stomach Powder (SP 1200) |
+| Valentine's Day | Love Chocolate (HP 800, SP 400) | Gyrophora Chicken (SP 935) |
+| Lantern Festival | Yo BBQ Sauce (HP 1200) | Ginseng Thick Soup (SP 850) |
+| White Day | Passion Chocolate (HP 1200, SP 600) | Takoyaki (SP 700, HP 300) |
+| Spring Festival | Go Cole (HP 1000) | Ginseng Chicken (SP 650, HP 175) |
+| Anniversary | Soyseafood Rice (HP 900, SP 650) | Asiatic Wormwood (SP 600) |
+| Dragon Boat Festival | He Riceball (HP 1200, SP 600) | Koryo Insam (SP 1200) |
+| Summer | Hawaii Wine (HP 1000, SP 800) | Stomach Powder (SP 1200) |
+| Artisan Festival | He Riceball (HP 1200, SP 600) | Gyrophora Chicken (SP 935) |
+| Mid-Autumn Festival | Queen's Peach (HP 1000, SP 500) | Ginseng Thick Soup (SP 850) |
+| Halloween | QQ Noodles (HP 1500) | Takoyaki (SP 700, HP 300) |
+| Thanksgiving | Turkey (HP 800) | Ginseng Chicken (SP 650, HP 175) |
+| Christmas | Turkey (HP 800) | Asiatic Wormwood (SP 600) |
+| New Year | Soyseafood Rice (HP 900, SP 650) | Koryo Insam (SP 1200) |
+
+The forging scrolls work the same way: each event has one scroll of each rarity, and the Seraph Scroll (100%) is every
+event's jackpot scroll.
+
+No bag has two prizes of the same family in one tier, and no prize twice. A family is what the item does: every pet amity
+item (the Amity Jellies, Spring and Bless Jelly, Love Picnic Lunch, Love Bouquets: Item.dat effect 64), high-HP foods,
+high-SP foods, pizzas, fireworks, throwables (snowballs, Water Ball, Lantern Cannon), gems (diamonds and spars), Bomb Diamonds, forging scrolls, Wit Maid
+suits, ears boxes, wing boxes, weapon boxes, random gift boxes, door vouchers, gear combiners, saddles, outfits, hats,
+furniture, EXP items and hammers; anything else is its own family. The four Alchemy Books are the one exception (their
+chances were set on purpose), and the 2013 Big Turkey is a bag of food.
+
+| Rarity | Scrolls | Events |
+|---|---|---|
+| Common (common bag ×3) | Demon 50%, Principality 60% | Demon: Winter Festival, Valentine's Day, White Day, Anniversary, Summer, Mid-Autumn Festival, Thanksgiving, New Year; Principality: Chinese New Year, Lantern Festival, Spring Festival, Dragon Boat Festival, Artisan Festival, Halloween, Christmas |
+| Uncommon (common bag ×2) | Archangel 65%, Virtues 70%, Small Demon 50% for +4 (×1) | Archangel: Winter Festival, Lantern Festival, Anniversary, Artisan Festival, Thanksgiving; Virtues: Chinese New Year, White Day, Dragon Boat Festival, Mid-Autumn Festival, Christmas; Small Demon: Valentine's Day, Spring Festival, Summer, Halloween, New Year |
+| Rare (common bag ×1, big bag ×2) | Ofanim 80%, Cherubim 90% | Ofanim: Winter Festival, Chinese New Year, White Day, Spring Festival, Summer, Artisan Festival, Thanksgiving, Christmas; Cherubim: Valentine's Day, Lantern Festival, Anniversary, Dragon Boat Festival, Mid-Autumn Festival, Halloween, New Year |
+Travel items aren't prizes (Bamboo Dragonfly, Teleport Scroll, GPS, Memory Crystal, also taken out of the War Pack, the
+Scroll Pack and the Thanksgiving Egg in `Data/MallBoxes.tsv`); the Yacht Voucher is only a top prize.
 
 The four choice cards (gift cards, `Data/GiftCards.tsv`) are exchanged for any one prize of their tier from every event,
 chosen by the player, so a prize whose event is months away is still within reach. Everything a common bag (or the 2013 Big
@@ -517,18 +577,19 @@ the big bags. Holiday items fill only their own event's bags.
 
 | Card | Choose one of |
 |---|---|
-| Bronze Card (50017) | the 57 uncommons, Alchemy Book 1, the Escape Button and the four bottle potions |
-| Silver Card (50018) | the 81 rares |
+| Bronze Card (50017) | the 56 uncommons, Alchemy Book 1, the Escape Button and the four bottle potions |
+| Silver Card (50018) | the 79 rares |
 | Golden Card (50019) | the 22 jackpots |
 | Free Card (50000) | the 12 top prizes |
 
-At 20 kills a minute that is about 1.2 Bronze Cards and 0.6 Silver Cards an hour. Outside its own event, getting a
-chosen prize takes about 1.5 to 5 times as many monsters as during it (about 1 in 1,000 kills for an uncommon, 2,000 for a
-rare, 80,000 for a jackpot and 800,000 for a top prize, against 350, 1,200, 26,000 and 170,000 in season). After changing a card's choices, raise `GiftCards.Flag` so clients reload their saved lists.
+A choice card is at most half as likely as the most likely row of its tier in the same bag. At 20 kills a minute that is
+about 0.4 Bronze Cards and 0.16 Silver Cards an hour. Outside its own event, getting a chosen prize takes about 2.5 to 6.5
+times as many monsters as during it (about 1 in 3,100 kills for an uncommon, 7,400 for a rare, 80,000 for a jackpot and
+1,600,000 for a top prize, against 470, 2,700, 18,000 and 320,000 in season). After changing a card's choices, raise `GiftCards.Flag` so clients reload their saved lists.
 
 The mall's real boxes are prizes too (Gift Pack, War Pack, Scroll Pack, Gear Pack with the pet gear, Transferred Pack,
 Water Pack, Maid Box, Crystal Ice Cube, Super Gift Box, Friendship Pumpkin, Thanksgiving Egg, 2010 Jolly Pack, Anniversary
-Big Bag 34302), with their pet voucher rows taken out of `Data/MallBoxes.tsv`.
+Big Bag 34302), with their pet voucher and travel item rows taken out of `Data/MallBoxes.tsv`.
 
 Mall items no event gives, on purpose:
 
@@ -541,6 +602,7 @@ Mall items no event gives, on purpose:
 | Weak food | Fruit Cake, Neapolitan Sundaes |
 | Boxes whose contents are given directly | Training Box, New Year Box, New Year Pack, 2011 Ghost Pack, 2011 Big Egg, Glazed Stone Bag, Magic Set Box, Glaze Bag |
 | Pet gear, in the Gear Pack | the 13 "Special for ..." pet gear pieces |
+| Travel | Bamboo Dragonfly, Teleport Scroll, Normal GPS, Memory Crystal, and the Wishing Coin (its Holy Village pool gifts include 20 Boarded Vouchers and the VIP Card) |
 
 The common bags can't be traded and the big bags (the year "Pack"s) can, as in the original game. The 2013 Big Turkey only
 opens into food, so trading it in is worth more; the 2013 Big Box it is traded for is Thanksgiving's common

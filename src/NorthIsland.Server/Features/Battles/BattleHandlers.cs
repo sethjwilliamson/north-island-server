@@ -129,7 +129,7 @@ public sealed partial class BattleHandlers(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>The seconds a monster that started a fight stays hidden for the others while it fights.</summary>
+    /// <summary>The seconds a monster that started a fight stays hidden while it fights.</summary>
     private const int BattleHideSeconds = 3600;
 
     /// <summary>Tells whether a map NPC is a monster.</summary>
@@ -145,17 +145,51 @@ public sealed partial class BattleHandlers(
     private bool StartedByMonster(Battle battle) =>
         battle.StartedByMapNpcEvent && IsMonsterRole(battle.MapId, battle.SourceRole);
 
-    /// <summary>Hides the monster that started the battle from the other players on the map.</summary>
+    /// <summary>Tells whether the monster that started the battle has a respawn of its own for each player.</summary>
+    /// <param name="battle">The battle.</param>
+    /// <returns>True for a roaming monster outside instances that counts toward no instance goal, while the setting is on.</returns>
+    private bool HasPersonalRespawn(Battle battle)
+    {
+        if (!options.Value.PersonalRoamingMonsters || !StartedByMonster(battle) || maps.InstanceOfMap(battle.MapId) is not null)
+            return false;
+        var scene = maps.Scene(battle.MapId)!;
+        var monster = scene.Npcs[battle.SourceRole - 1];
+        return NpcWander.Roams(monster) && !scene.EventsOf(monster)
+            .SelectMany(e => e.Conditions)
+            .SelectMany(c => c.Results)
+            .Any(r => ResultMapper.Map(r).Action == ResultAction.InstanceGoal); // the goal is the team's: one kill must count once
+    }
+
+    /// <summary>
+    /// Hides the monster that started the battle: from the other players on the map, or only from the fighters when it has a respawn for each player.
+    /// The fighters are not told while they fight.
+    /// </summary>
     /// <param name="battle">The battle.</param>
     private void HideMonsterWhileFighting(Battle battle)
     {
         if (!StartedByMonster(battle))
             return;
+        if (HasPersonalRespawn(battle))
+        {
+            foreach (var player in battle.Players)
+                HideFromFighter(battle, player);
+            logger.LogInformation("Monster {Role} of map {Map} is fighting: out of play for its fighters only", battle.SourceRole, battle.MapId);
+            return;
+        }
         world.HideMonster(battle.MapId, battle.SourceRole, BattleHideSeconds, except: s => ReferenceEquals(s.Battle, battle));
         logger.LogInformation("Monster {Role} of map {Map} is fighting: hidden for the others on the map", battle.SourceRole, battle.MapId);
     }
 
-    /// <summary>Hides or shows again the monster that started a battle, once the battle is over.</summary>
+    /// <summary>Takes the monster that started the battle out of play for one of its fighters, without telling them while they fight.</summary>
+    /// <param name="battle">The battle.</param>
+    /// <param name="player">The fighter.</param>
+    private void HideFromFighter(Battle battle, Fighter player) =>
+        world.HideMonster(battle.MapId, battle.SourceRole, BattleHideSeconds, except: s => ReferenceEquals(s.Battle, battle), player: player.Id);
+
+    /// <summary>
+    /// Hides or shows again the monster that started a battle, once the battle is over: for everyone, or for each player who was in the fight,
+    /// those who left it early too, when it has a respawn for each player.
+    /// </summary>
     /// <param name="battle">The battle.</param>
     /// <param name="outcome">How the battle ended for the players.</param>
     /// <param name="fled">True when the players fled.</param>
@@ -164,10 +198,21 @@ public sealed partial class BattleHandlers(
         if (!StartedByMonster(battle))
             return;
         var seconds = outcome == BattleOutcome.Won ? options.Value.DefeatedMonsterHideSeconds : fled ? options.Value.FledMonsterHideSeconds : 0;
-        if (seconds > 0)
-            world.HideMonster(battle.MapId, battle.SourceRole, seconds);
-        else
-            world.ShowMonster(battle.MapId, battle.SourceRole);
+        if (!HasPersonalRespawn(battle))
+        {
+            if (seconds > 0)
+                world.HideMonster(battle.MapId, battle.SourceRole, seconds);
+            else
+                world.ShowMonster(battle.MapId, battle.SourceRole);
+            return;
+        }
+        foreach (var player in battle.Players.Select(p => p.Id).Distinct())
+        {
+            if (seconds > 0)
+                world.HideMonster(battle.MapId, battle.SourceRole, seconds, player: player);
+            else
+                world.ShowMonster(battle.MapId, battle.SourceRole, player);
+        }
     }
 
     /// <summary>Tells whether a player can start or join a fight.</summary>
@@ -346,6 +391,8 @@ public sealed partial class BattleHandlers(
             pet = battle.PetOf(joined);
             pet?.JoinedRound = battle.Round;
             EnterBattle(session, battle);
+            if (HasPersonalRespawn(battle))
+                HideFromFighter(battle, joined); // under the lock, so the end of the battle cannot come first
         }
         Fighter[] newcomers = pet is null ? [joined] : [joined, pet];
         battle.Send(client => BattleMessages.Join(newcomers.Select(f => f.ToRecord(own: false)), client), except: session);
@@ -545,7 +592,8 @@ public sealed partial class BattleHandlers(
             return "a scene object";
         if ((maps.SceneFlags(character.MapId) & 1) != 0)
             return "no PK on this map";
-        if (world.MonsterIsOut(character.MapId, role) || session.HiddenNpcs.TryGetValue((character.MapId, role), out var until) && until > GameClock.UtcNow)
+        if (world.MonsterIsOut(character.MapId, role) || world.MonsterIsOutFor(character.MapId, role, session.Account!.LoginId)
+            || session.HiddenNpcs.TryGetValue((character.MapId, role), out var until) && until > GameClock.UtcNow)
             return "hidden";
         if (!IsFree(session))
             return "busy";
@@ -703,7 +751,8 @@ public sealed partial class BattleHandlers(
         }
         run.PendingBattle = null;
 
-        var sourceRole = run.Trigger is >= 1 and <= 3 ? (ushort)run.Index : (ushort)0;
+        // only these triggers carry an NPC's role: the index of an area run is its encounter zone's
+        var sourceRole = run.Trigger is EventEngine.TriggerClick or EventEngine.TriggerNear ? (ushort)run.Index : (ushort)0;
         var eventMap = (ushort)run.MapId; // the battle is one of the map whose event is waiting for it, wherever the player stands now
         var source = maps.Scene(eventMap)?.Battles.FirstOrDefault(b => b.Index == index);
         var battle = source is null
@@ -724,8 +773,12 @@ public sealed partial class BattleHandlers(
                 break;
             if (world.SessionOf(memberId) is not { } member || member.ActiveCharacter is not { } mc || mc.MapId != character.MapId || !IsFree(member))
                 continue;
+            // a member waiting for their own respawn stays out, but for the next of several battles in a row of the same event
+            if (sourceRole != 0 && world.MonsterIsOutFor(eventMap, sourceRole, memberId) && !run.Fighters.Contains(memberId))
+                continue;
             battle.AddPlayer(mc, memberId, member, Battle.MemberCols[col++], id => npcs[id], id => items[id]);
             EnterBattle(member, battle);
+            run.Fighters.Add(memberId);
         }
 
         EnterBattle(session, battle);

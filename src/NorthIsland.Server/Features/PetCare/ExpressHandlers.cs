@@ -55,7 +55,13 @@ public sealed class ExpressHandlers(
             session.Send(ExpressMessages.Error(refusal.Code, refusal.Item));
             return ValueTask.CompletedTask;
         }
-        session.PetJobs.Express = new ExpressJob(petId, targetId, stacks, GameClock.UtcNow.AddSeconds(Math.Max(0, options.Value.ItemUse.ExpressSeconds)));
+        var loaded = stacks.Select(s => ExpressLoad.Of(c.Bag.Find(b => b.Slot == s.Slot)!)).ToList(); // Check found every stack
+        session.PetJobs.Express = new ExpressJob(
+            petId,
+            targetId,
+            stacks,
+            GameClock.UtcNow.AddSeconds(Math.Max(0, options.Value.ItemUse.ExpressSeconds)),
+            loaded);
         session.Send(ExpressMessages.State(petId, started: true));
         session.Send(ExpressMessages.PetWalk(petId, 1));
         logger.LogInformation(
@@ -79,8 +85,9 @@ public sealed class ExpressHandlers(
     }
 
     /// <summary>
-    /// Called every second under the sender's gate: when the trip is due, takes the target's gate, checks the stacks and the target's bag again,
-    /// delivers them and ends the trip. A target whose connection ended is not online any more: its character was saved for the last time.
+    /// Called every second under the sender's gate: when the trip is due, takes the target's gate, checks that every carried slot still holds the
+    /// stack loaded at the start (see <see cref="ExpressJob.Changed"/>), checks the stacks and the target's bag again, delivers them and ends the
+    /// trip. A target whose connection ended is not online any more: its character was saved for the last time.
     /// </summary>
     /// <param name="session">The sender's session.</param>
     public void Tick(GameSession session)
@@ -93,7 +100,12 @@ public sealed class ExpressHandlers(
             return; // the target is handling a packet: check and deliver on the next tick, without waiting in the ticker
         using (held)
         {
-            (byte Code, ushort Item)? refusal = target is { Closing: true } ? (2, 0) : Check(session, c, job.TargetId, job.Stacks); // 2: not online
+            var changed = job.Changed(c.Bag);
+            if (changed is { } swapped)
+                logger.LogWarning("[{Session}] {Name}: express refused, bag slot {Slot} no longer holds the loaded stack", session.Id, c.Name, swapped.Slot);
+            (byte Code, ushort Item)? refusal = changed is { } at
+                ? (1, at.Item) // 1: a loaded slot holds another stack now: deliver exactly what was loaded, or nothing
+                : target is { Closing: true } ? (2, 0) : Check(session, c, job.TargetId, job.Stacks); // 2: not online
             if (refusal is null && ReferenceEquals(world.SessionOf(job.TargetId), target) && target!.ActiveCharacter is { } tc)
                 Deliver(session, c, target, tc, job);
             else

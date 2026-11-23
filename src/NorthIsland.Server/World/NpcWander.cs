@@ -138,7 +138,7 @@ public sealed class NpcWander(
         if (options.Value.WanderMaxSeconds <= 0)
             return;
         List<(ushort Map, byte[] Packet)> moves = [];
-        List<(GameSession Session, ushort Role, string Name)> touches = [];
+        List<(GameSession Session, ushort Map, ushort Role, string Name)> touches = [];
         lock (_lock)
         {
             foreach (var map in world.OnlineMaps())
@@ -153,7 +153,7 @@ public sealed class NpcWander(
                         if (distance <= options.Value.TouchRadius)
                         {
                             target.TouchCooldown[(map, w.Role)] = now.AddSeconds(6);
-                            touches.Add((target, w.Role, w.Npc.Name));
+                            touches.Add((target, map, w.Role, w.Npc.Name));
                             Retarget(w, x, y, x, y, now);
                             w.Chasing = null;
                             w.NextMove = now + NextPause();
@@ -186,18 +186,72 @@ public sealed class NpcWander(
             foreach (var s in world.OnMap(map))
                 s.Send(packet);
         }
-        foreach (var (session, role, name) in touches)
+        foreach (var (session, map, role, name) in touches)
+            Touch(session, map, role, name);
+    }
+
+    /// <summary>
+    /// Starts the touch event of a roaming NPC under the player's gate: at once when the gate is free, else from a task that holds no gate and
+    /// waits for it, so the tick never waits for a player (see <see cref="GameSession.TryExclusiveFrom"/> for the rule).
+    /// </summary>
+    /// <param name="session">The touched player's session.</param>
+    /// <param name="map">The map the NPC roams.</param>
+    /// <param name="role">The NPC's role number in the scene.</param>
+    /// <param name="name">The NPC's name, for the log.</param>
+    private void Touch(GameSession session, ushort map, ushort role, string name)
+    {
+        if (session.TryExclusiveNow(null, out var held))
         {
-            if (!BattleHandlers.IsFree(session))
-                continue;
-            logger.LogInformation("[{Session}] {Name} is touched by roaming NPC {Role} ({Npc})", session.Id, session.ActiveCharacter?.Name, role, name);
+            using (held)
+                TouchHeld(session, map, role, name);
+            return;
+        }
+        _ = TouchLaterAsync(session, map, role, name);
+    }
+
+    /// <summary>Waits for the player's gate, holding no other, and starts the touch event.</summary>
+    /// <param name="session">The touched player's session.</param>
+    /// <param name="map">The map the NPC roams.</param>
+    /// <param name="role">The NPC's role number in the scene.</param>
+    /// <param name="name">The NPC's name, for the log.</param>
+    /// <returns>The task.</returns>
+    private async Task TouchLaterAsync(GameSession session, ushort map, ushort role, string name)
+    {
+        using (await session.ExclusiveAsync().ConfigureAwait(false))
+            TouchHeld(session, map, role, name);
+    }
+
+    /// <summary>
+    /// Starts the touch event under the player's gate when the player may still be touched: the connection is open, the player is on the map
+    /// and free, past the arrival grace, and the monster is not out. A touch that fails is logged and leaves the other touches alone.
+    /// </summary>
+    /// <param name="session">The touched player's session.</param>
+    /// <param name="map">The map the NPC roams.</param>
+    /// <param name="role">The NPC's role number in the scene.</param>
+    /// <param name="name">The NPC's name, for the log.</param>
+    private void TouchHeld(GameSession session, ushort map, ushort role, string name)
+    {
+        try
+        {
+            if (session.Closing
+                || session.ActiveCharacter is not { } c
+                || c.MapId != map
+                || !BattleHandlers.IsFree(session)
+                || session.ArrivedUtc.AddSeconds(options.Value.ArrivalGraceSeconds) > GameClock.UtcNow
+                || world.MonsterIsOut(map, role))
+                return;
+            logger.LogInformation("[{Session}] {Name} is touched by roaming NPC {Role} ({Npc})", session.Id, c.Name, role, name);
             events.Start(session, EventEngine.TriggerClick, role);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "[{Session}] touch by roaming NPC {Role} ({Npc}) on map {Map} failed", session.Id, role, name, map);
         }
     }
 
     /// <summary>
-    /// Finds the nearest player the NPC may chase: free, not a team member, not hiding it, not in a touch cooldown or
-    /// protected, and within the chase radius.
+    /// Finds the nearest player the NPC may chase: free, not a team member, not hiding it or waiting for their own respawn of it,
+    /// not in a touch cooldown or protected, and within the chase radius.
     /// </summary>
     /// <param name="w">The roaming NPC.</param>
     /// <param name="map">The map id.</param>
@@ -224,7 +278,8 @@ public sealed class NpcWander(
                 || s.ArrivedUtc.AddSeconds(options.Value.ArrivalGraceSeconds) > now
                 || s.HiddenNpcs.TryGetValue((map, w.Role), out var hidden) && hidden > now
                 || s.TouchCooldown.TryGetValue((map, w.Role), out var cooldown) && cooldown > now
-                || s.Encounters.Immune(now))
+                || s.Encounters.Immune(now)
+                || s.Account is { } player && world.MonsterIsOutFor(map, w.Role, player.LoginId))
                 continue;
             var distance = Math.Sqrt((c.X - x) * (c.X - x) + (c.Y - y) * (c.Y - y));
             if (distance <= options.Value.ChaseRadius && (best is null || distance < best.Value.Item2))

@@ -626,58 +626,93 @@ public sealed class WorldState(
         return true;
     }
 
-    /// <summary>The roaming monsters that are hidden now, by map and role, with the time they come back.</summary>
-    private readonly ConcurrentDictionary<(ushort Map, ushort Role), DateTime> _monstersOut = new();
+    /// <summary>The player id (0) that stands for everyone in the monsters that are hidden.</summary>
+    private const int Everyone = 0;
 
-    /// <summary>Whether a roaming monster is hidden at the moment; an elapsed hide is forgotten.</summary>
+    /// <summary>The roaming monsters that are hidden now, by map, role and the player they are hidden from, with the time they come back.</summary>
+    private readonly ConcurrentDictionary<(ushort Map, ushort Role, int Player), DateTime> _monstersOut = new();
+
+    /// <summary>Whether a roaming monster is hidden from everyone at the moment; an elapsed hide is forgotten.</summary>
     /// <param name="mapId">The map id.</param>
     /// <param name="role">The monster's role number in the scene.</param>
     /// <returns>True when hidden.</returns>
-    public bool MonsterIsOut(ushort mapId, ushort role)
+    public bool MonsterIsOut(ushort mapId, ushort role) => IsOut((mapId, role, Everyone));
+
+    /// <summary>Whether a roaming monster is hidden from one player alone at the moment, waiting for their own respawn of it.</summary>
+    /// <param name="mapId">The map id.</param>
+    /// <param name="role">The monster's role number in the scene.</param>
+    /// <param name="player">The player id.</param>
+    /// <returns>True when hidden from that player alone.</returns>
+    public bool MonsterIsOutFor(ushort mapId, ushort role, int player) => IsOut((mapId, role, player));
+
+    /// <summary>Whether a hide still runs; an elapsed one is forgotten.</summary>
+    /// <param name="key">The map, the role and the player of the hide.</param>
+    /// <returns>True while it runs.</returns>
+    private bool IsOut((ushort Map, ushort Role, int Player) key)
     {
-        if (!_monstersOut.TryGetValue((mapId, role), out var until))
+        if (!_monstersOut.TryGetValue(key, out var until))
             return false;
         if (until > GameClock.UtcNow)
             return true;
-        _monstersOut.TryRemove(new KeyValuePair<(ushort, ushort), DateTime>((mapId, role), until));
+        _monstersOut.TryRemove(new KeyValuePair<(ushort, ushort, int), DateTime>(key, until));
         return false;
     }
 
-    /// <summary>Hides a roaming monster for some seconds for the players on its map and remembers it.</summary>
+    /// <summary>Hides a roaming monster for some seconds from the players on its map, or from one player alone, and remembers it.</summary>
     /// <param name="mapId">The map id.</param>
     /// <param name="role">The monster's role number in the scene.</param>
     /// <param name="seconds">How long to hide it.</param>
-    /// <param name="except">Skips the players for which this returns true; null skips none.</param>
-    public void HideMonster(ushort mapId, ushort role, int seconds, Func<GameSession, bool>? except = null)
+    /// <param name="except">Does not tell the players for which this returns true; null tells all.</param>
+    /// <param name="player">The only player it is hidden from; 0 hides it from everyone.</param>
+    public void HideMonster(
+        ushort mapId,
+        ushort role,
+        int seconds,
+        Func<GameSession, bool>? except = null,
+        int player = Everyone)
     {
         var s = (ushort)Math.Clamp(seconds, 1, ushort.MaxValue - 1);
-        _monstersOut[(mapId, role)] = GameClock.UtcNow.AddSeconds(s);
+        _monstersOut[(mapId, role, player)] = GameClock.UtcNow.AddSeconds(s);
         var packet = EventMessages.NpcHideFor(role, s);
-        foreach (var other in OnMap(mapId).Where(o => except?.Invoke(o) != true))
+        foreach (var other in ViewersOf(mapId, player).Where(o => except?.Invoke(o) != true))
             other.Send(packet);
     }
 
-    /// <summary>Shows a hidden roaming monster again to the players on its map.</summary>
+    /// <summary>Shows a hidden roaming monster again to the players on its map, or to the one player it was hidden from.</summary>
     /// <param name="mapId">The map id.</param>
     /// <param name="role">The monster's role number in the scene.</param>
-    public void ShowMonster(ushort mapId, ushort role)
+    /// <param name="player">The only player it was hidden from; 0 for everyone.</param>
+    public void ShowMonster(ushort mapId, ushort role, int player = Everyone)
     {
-        _monstersOut.TryRemove((mapId, role), out _);
+        _monstersOut.TryRemove((mapId, role, player), out _);
         var packet = EventMessages.NpcShowFor(role, ushort.MaxValue);
-        foreach (var other in OnMap(mapId))
+        foreach (var other in ViewersOf(mapId, player))
             other.Send(packet);
     }
 
-    /// <summary>Tells a player the monsters of their map that are still hidden, with the seconds left.</summary>
+    /// <summary>The players on a map whom a hide is for.</summary>
+    /// <param name="mapId">The map id.</param>
+    /// <param name="player">The player it is for; 0 for everyone.</param>
+    /// <returns>The sessions.</returns>
+    private IEnumerable<GameSession> ViewersOf(ushort mapId, int player) =>
+        player == Everyone ? OnMap(mapId)
+        : SessionOf(player) is { } session && session.ActiveCharacter?.MapId == mapId ? [session]
+        : [];
+
+    /// <summary>Tells a player the monsters of their map that are still hidden from them, with the seconds left, and forgets the elapsed hides.</summary>
     /// <param name="session">The player's session.</param>
     public void SendHiddenMonsters(GameSession session)
     {
         if (session.ActiveCharacter is not { } c)
             return;
         var now = GameClock.UtcNow;
-        foreach (var ((map, role), until) in _monstersOut)
+        var id = PlayerId(session);
+        foreach (var (key, until) in _monstersOut)
         {
-            if (map == c.MapId && until > now)
+            var (map, role, player) = key;
+            if (until <= now)
+                _monstersOut.TryRemove(new KeyValuePair<(ushort, ushort, int), DateTime>(key, until));
+            else if (map == c.MapId && (player == Everyone || player == id))
                 session.Send(EventMessages.NpcHideFor(role, (ushort)Math.Clamp((int)Math.Ceiling((until - now).TotalSeconds), 1, ushort.MaxValue - 1)));
         }
     }

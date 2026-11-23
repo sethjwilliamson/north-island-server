@@ -246,7 +246,10 @@ public sealed partial class BattleHandlers
             1 => ally ?? actor, // own side: the chosen ally, else the caster
             2 => chosen ?? actor, // anyone: the chosen fighter, else the caster
             3 => actor, // self
-            5 => ally is not null && !ReferenceEquals(ally, actor) ? ally : battle.OwnSide.FirstOrDefault(f => f.IsAlive && !ReferenceEquals(f, actor)), // ally
+            // anyone but oneself (Magic Recovery, Water Mana, Ammonia): the chosen fighter of either side, else the first other ally
+            5 => chosen is not null && !ReferenceEquals(chosen, actor)
+                ? chosen
+                : battle.OwnSide.FirstOrDefault(f => f.IsAlive && !ReferenceEquals(f, actor)),
             _ => null, // any other target type: no target
         };
     }

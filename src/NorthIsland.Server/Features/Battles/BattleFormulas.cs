@@ -257,8 +257,22 @@ public static class BattleFormulas
     /// <returns>The rounded result, at least 1.</returns>
     public static int Scale(int damage, double scale) => Math.Max(1, (int)Math.Min(int.MaxValue, Math.Round(damage * scale)));
 
-    /// <summary>The chance in percent that a damaging skill's status effect lands.</summary>
-    public const int StatusHitChancePercent = 80;
+    /// <summary>
+    /// The chance in percent that a resisted status (a control or Seal, see <see cref="StatusRules.IsResisted"/>) lands on an enemy:
+    /// the base chance moved by the spread times the caster's Intelligence lead over the target's Wisdom, as a share of the two summed,
+    /// then held between the floor and the ceiling.
+    /// </summary>
+    /// <param name="caster">The fighter putting the status on.</param>
+    /// <param name="target">The enemy receiving it.</param>
+    /// <param name="o">The battle options with the chance terms.</param>
+    /// <returns>Base + Spread * (INT - WIS) / (INT + WIS), between the floor and the ceiling; the base when both stats are 0.</returns>
+    public static double StatusHitChance(Fighter caster, Fighter target, BattleOptions o)
+    {
+        var total = Math.Max(0, caster.Intelligence) + Math.Max(0, target.Wisdom);
+        var lead = total > 0 ? (double)(Math.Max(0, caster.Intelligence) - Math.Max(0, target.Wisdom)) / total : 0;
+        var chance = o.StatusChanceBasePercent + o.StatusChanceSpreadPercent * lead;
+        return Math.Min(o.StatusChanceMaxPercent, Math.Max(o.StatusChanceMinPercent, chance));
+    }
 
     /// <summary>The damage poison does to a fighter each round.</summary>
     /// <param name="target">The poisoned fighter.</param>

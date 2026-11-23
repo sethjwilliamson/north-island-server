@@ -91,6 +91,10 @@ public sealed class FieldEncounters
             return false;
         if (TimedEffects.EncountersBlocked(character, TimedEffects.Now))
             return false;
+        // IGG's v4.0 preview: once a player's training time is up they can tour the Training Area "without any interruption from monsters".
+        // A team still meets monsters while one of its players in training is on the island, but only that player gets EXP.
+        if (TrainingIslandHandlers.IsIslandMap(map) && !AnyoneTraining(id, character))
+            return false;
         if (session.Vehicle is { Riding: true } ride && !PlacedVehicle.IsRobot(ride.ItemId))
             return false;
         if (roll >= o.FieldEncounterPercent)
@@ -109,6 +113,20 @@ public sealed class FieldEncounters
             return true;
         }
         return !zoneFirst && mine is not null && StartZone(session, character, mine);
+    }
+
+    /// <summary>Whether the player, or a member of the player's team on the same map, has a running training state.</summary>
+    /// <param name="id">The player's id (the team leader when in a team).</param>
+    /// <param name="character">The player's active character.</param>
+    /// <returns>True when someone who would meet the fight is in training.</returns>
+    private bool AnyoneTraining(int id, Character character)
+    {
+        if (TrainingIslandHandlers.IsTraining(character))
+            return true;
+        foreach (var memberId in _world.Teams.MembersOf(id))
+            if (_world.SessionOf(memberId)?.ActiveCharacter is { } c && c.MapId == character.MapId && TrainingIslandHandlers.IsTraining(c))
+                return true;
+        return false;
     }
 
     /// <summary>Tells whether the encounter zone the player stands in is tried before the field monsters around.</summary>
@@ -160,6 +178,7 @@ public sealed class FieldEncounters
             if (_npcs[(ushort)npc.NpcId] is not { IsMonster: true }
                 || !scene.EventsOf(npc).Any(e => e.IsFieldMonster)
                 || _world.MonsterIsOut(character.MapId, role)
+                || _world.MonsterIsOutFor(character.MapId, role, session.Account!.LoginId)
                 || session.HiddenNpcs.TryGetValue((character.MapId, role), out var hidden) && hidden > now
                 || session.NpcStates.TryGetValue(role, out var state) && state is 2 or 4)
                 continue;

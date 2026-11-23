@@ -78,6 +78,12 @@ public sealed class BattleOptions
     /// <summary>How many seconds a monster that was beaten stays hidden on the map.</summary>
     public int DefeatedMonsterHideSeconds { get; set; } = 30;
 
+    /// <summary>
+    /// True when the fight against a roaming monster takes it out of play only for the players in that fight, so everyone has their own respawn
+    /// of it; stationary monsters, instances and monsters that count toward an instance goal always share one.
+    /// </summary>
+    public bool PersonalRoamingMonsters { get; set; }
+
     /// <summary>How many seconds after a battle a player cannot be drawn into a new fight.</summary>
     public int BattleImmunitySeconds { get; set; } = 5;
 
@@ -173,6 +179,18 @@ public sealed class BattleOptions
 
     /// <summary>Which control and debuff statuses can be on an enemy at the same time: one of each kind, or one in all.</summary>
     public DebuffStacking DebuffStacking { get; set; }
+
+    /// <summary>The chance in percent that a control or Seal lands on an enemy whose Wisdom equals the caster's Intelligence.</summary>
+    public double StatusChanceBasePercent { get; set; } = 50;
+
+    /// <summary>The percent the chance moves for a full Intelligence lead: base + spread * (INT - WIS) / (INT + WIS).</summary>
+    public double StatusChanceSpreadPercent { get; set; } = 60;
+
+    /// <summary>The lowest chance in percent that a control or Seal lands, however much Wisdom the target has.</summary>
+    public double StatusChanceMinPercent { get; set; } = 10;
+
+    /// <summary>The highest chance in percent that a control or Seal lands, however much Intelligence the caster has.</summary>
+    public double StatusChanceMaxPercent { get; set; } = 95;
 
     /// <summary>The percent more damage a target under Cuss takes.</summary>
     public double CussDamagePercent { get; set; } = 50;

@@ -158,7 +158,8 @@ public sealed partial class EventEngine(
 
     /// <summary>
     /// Finds out why a trigger may not start the events of an NPC or door: the object starts no events that way, the NPC is hidden for good
-    /// for the player, or the player is out of reach. An NPC is clicked from at most <see cref="TriggerReach.NpcClick"/> on each axis of the
+    /// for the player, the player waits for their own respawn of it, or the player is out of reach.
+    /// An NPC is clicked from at most <see cref="TriggerReach.NpcClick"/> on each axis of the
     /// places it can be, and a door from anywhere in the client's view (<see cref="TriggerReach.DoorClick"/>); the triggers sent while the
     /// player walks (an NPC come near, a door walked into) reach as far as a walk (<see cref="TriggerReach.Walk"/>).
     /// </summary>
@@ -169,7 +170,7 @@ public sealed partial class EventEngine(
     /// <param name="trigger">The trigger code.</param>
     /// <param name="index">The placement index of the NPC or door.</param>
     /// <returns>The reason, for the log; null when the trigger may start the events.</returns>
-    private static string? Refusal(GameSession session, Character character, EveScene scene, EvePlacedObject source, byte trigger, int index)
+    private string? Refusal(GameSession session, Character character, EveScene scene, EvePlacedObject source, byte trigger, int index)
     {
         var events = scene.EventsOf(source).ToList();
         if (source is EveDoor door)
@@ -188,6 +189,8 @@ public sealed partial class EventEngine(
             return "the NPC is hidden";
         if (session.HiddenNpcs.TryGetValue(((ushort)character.MapId, (ushort)index), out var until) && until > GameClock.UtcNow)
             return "the NPC is hidden";
+        if (world.MonsterIsOutFor(character.MapId, (ushort)index, session.Account!.LoginId))
+            return "the player waits for their own respawn of it";
         var reach = trigger == TriggerClick ? TriggerReach.NpcClick : TriggerReach.Walk;
         return TriggerReach.Of(npc).Reaches(character.X, character.Y, reach, reach) ? null : "out of reach";
     }
